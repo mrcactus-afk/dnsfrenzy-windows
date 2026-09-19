@@ -1,0 +1,12 @@
+﻿{
+    "http_test":  false,
+    "smart_mix":  true,
+    "interval":  30,
+    "fallback_primary":  "1.1.1.1",
+    "fallback_chain":  true,
+    "blacklist_duration":  300,
+    "fallback_secondary":  "1.0.0.1",
+    "blacklist_threshold":  3,
+    "http_timeout":  3,
+    "http_url":  ""
+}

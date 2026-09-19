@@ -1,0 +1,10 @@
+﻿data/state.json
+data/history.json
+data/blacklist.json
+data/dnsfrenzy.log
+*.bak
+*.bak2
+*.tmp
+Thumbs.db
+desktop.ini
+.DS_Store
