@@ -1,0 +1,20 @@
+﻿# Runtime data and generated config
+build/config/
+build/data/
+
+# Release artifacts
+release/
+
+# Backups
+*.bak
+*.bak2
+*.tmp
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local notes
+.dev-notes.txt
+.notes/
