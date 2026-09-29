@@ -1,9 +1,11 @@
-﻿# Runtime data and generated config
+# Runtime data
+data/
 build/config/
 build/data/
 
 # Release artifacts
 release/
+dist/
 
 # Backups
 *.bak
@@ -18,3 +20,13 @@ desktop.ini
 # Local notes
 .dev-notes.txt
 .notes/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+*.spec
