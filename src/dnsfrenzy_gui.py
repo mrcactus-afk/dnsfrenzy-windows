@@ -45,8 +45,20 @@ except Exception:
 
 
 def _find_root() -> Optional[Path]:
-    here = Path(__file__).resolve().parent
-    for cand in (here, here.parent, Path("C:/DNSFrenzyWindows"), Path("C:/DNSFrenzy")):
+    cands = []
+    try:
+        here = Path(__file__).resolve().parent
+        cands.extend([here, here.parent])
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        try:
+            exe_dir = Path(sys.executable).resolve().parent
+            cands.extend([exe_dir, exe_dir.parent])
+        except Exception:
+            pass
+    cands.extend([Path("C:/DNSFrenzyWindows"), Path("C:/DNSFrenzy")])
+    for cand in cands:
         try:
             if (cand / "config" / "servers.txt").is_file():
                 return cand
@@ -336,7 +348,10 @@ def set_autostart(on: bool) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             if on:
-                cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}"'
+                else:
+                    cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
                 winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, cmd)
             else:
                 try:
