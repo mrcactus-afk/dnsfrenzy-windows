@@ -1,3 +1,6 @@
+# Compiled output
+build/
+
 # Runtime data
 data/
 build/config/
