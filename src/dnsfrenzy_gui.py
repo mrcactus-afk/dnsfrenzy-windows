@@ -39,18 +39,17 @@ except Exception:
 
 
 def _find_root() -> Optional[Path]:
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent
+        except Exception:
+            return None
     cands = []
     try:
         here = Path(__file__).resolve().parent
         cands.extend([here, here.parent])
     except Exception:
         pass
-    if getattr(sys, "frozen", False):
-        try:
-            exe_dir = Path(sys.executable).resolve().parent
-            cands.extend([exe_dir, exe_dir.parent])
-        except Exception:
-            pass
     cands.extend([Path("C:/DNSFrenzyWindows"), Path("C:/DNSFrenzy")])
     for cand in cands:
         try:
@@ -63,19 +62,30 @@ def _find_root() -> Optional[Path]:
 
 ROOT = _find_root()
 if ROOT is None:
-    print("DNSFrenzy: config/servers.txt not found.")
+    print("DNSFrenzy: could not locate install directory.")
     sys.exit(1)
 
-CONFIG_DIR = ROOT / "config"
-DATA_DIR = ROOT / "data"
-DATA_DIR.mkdir(exist_ok=True)
+FROZEN = getattr(sys, "frozen", False)
 
-SERVER_FILE = CONFIG_DIR / "servers.txt"
-SETTINGS_FILE = DATA_DIR / "settings.json"
-STATE_FILE = DATA_DIR / "state.json"
-HISTORY_FILE = DATA_DIR / "history.json"
-BLACKLIST_FILE = DATA_DIR / "blacklist.json"
-LOG_FILE = DATA_DIR / "dnsfrenzy.log"
+if FROZEN:
+    CONFIG_DIR = ROOT
+    DATA_DIR = ROOT
+    SERVER_FILE = ROOT / "servers.txt"
+    SETTINGS_FILE = ROOT / "dnsfrenzy.json"
+    STATE_FILE = ROOT / "dnsfrenzy.json"
+    HISTORY_FILE = ROOT / "dnsfrenzy.json"
+    BLACKLIST_FILE = ROOT / "dnsfrenzy.json"
+    LOG_FILE = ROOT / "dnsfrenzy.log"
+else:
+    CONFIG_DIR = ROOT / "config"
+    DATA_DIR = ROOT / "data"
+    DATA_DIR.mkdir(exist_ok=True)
+    SERVER_FILE = CONFIG_DIR / "servers.txt"
+    SETTINGS_FILE = DATA_DIR / "settings.json"
+    STATE_FILE = DATA_DIR / "state.json"
+    HISTORY_FILE = DATA_DIR / "history.json"
+    BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+    LOG_FILE = DATA_DIR / "dnsfrenzy.log"
 
 
 P = {
@@ -159,6 +169,54 @@ def save_json(path: Path, obj) -> None:
         pass
 
 
+
+
+def load_section(name: str, default):
+    if FROZEN:
+        try:
+            if not SETTINGS_FILE.is_file():
+                return default
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            return data.get(name, default)
+        except Exception:
+            return default
+    path = {
+        "settings": SETTINGS_FILE,
+        "state": STATE_FILE,
+        "history": HISTORY_FILE,
+        "blacklist": BLACKLIST_FILE,
+    }.get(name)
+    if path is None:
+        return default
+    return load_json(path, default)
+
+
+def save_section(name: str, obj) -> None:
+    if FROZEN:
+        try:
+            data = {}
+            if SETTINGS_FILE.is_file():
+                try:
+                    data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            data[name] = obj
+            SETTINGS_FILE.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return
+    path = {
+        "settings": SETTINGS_FILE,
+        "state": STATE_FILE,
+        "history": HISTORY_FILE,
+        "blacklist": BLACKLIST_FILE,
+    }.get(name)
+    if path is None:
+        return
+    save_json(path, obj)
 @dataclass
 class Server:
     name: str
@@ -320,6 +378,63 @@ def verify_dns() -> bool:
     return bool(ip) and not ip.startswith("198.20.")
 
 
+
+
+def snapshot_dns() -> list:
+    out = _ps(
+        "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "
+        "$a = Get-DnsClientServerAddress -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue; "
+        "if ($a) { $addrs = @($a.ServerAddresses | Where-Object { $_ }); "
+        "'{0}|{1}' -f $_.Name, ($addrs -join ',') } }"
+    )
+    result = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        name, addrs = line.split("|", 1)
+        parts = [a.strip() for a in addrs.split(",") if a.strip()]
+        result.append((name.strip(), parts))
+    return result
+
+
+def restore_dns(snapshot: list) -> None:
+    if not snapshot:
+        reset_dns()
+        return
+    for name, addrs in snapshot:
+        if not addrs:
+            _ps(
+                "Set-DnsClientServerAddress -InterfaceAlias "
+                f"'{name}' -ResetServerAddresses -ErrorAction SilentlyContinue",
+                timeout=10,
+            )
+            continue
+        if len(addrs) >= 2 and addrs[1] != addrs[0]:
+            _ps(
+                "Set-DnsClientServerAddress -InterfaceAlias "
+                f"'{name}' -ServerAddresses @('{addrs[0]}','{addrs[1]}') "
+                "-ErrorAction SilentlyContinue",
+                timeout=10,
+            )
+        else:
+            _ps(
+                "Set-DnsClientServerAddress -InterfaceAlias "
+                f"'{name}' -ServerAddresses @('{addrs[0]}') "
+                "-ErrorAction SilentlyContinue",
+                timeout=10,
+            )
+    _ps("ipconfig /flushdns | Out-Null", timeout=10)
+
+
+def verify_auto() -> bool:
+    out = _ps(
+        "Get-DnsClientServerAddress -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | "
+        "Where-Object { $_.ServerAddresses } | "
+        "Select-Object -First 1 -ExpandProperty ServerAddresses"
+    ).strip()
+    return not out
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "DNSFrenzy"
 
@@ -556,15 +671,15 @@ class App(QMainWindow):
         self._center_window(680, 800)
         self.setWindowOpacity(0.0)
 
-        self.settings = {**DEFAULT_SETTINGS, **(load_json(SETTINGS_FILE, {}) or {})}
-        self.persisted = load_json(STATE_FILE, {}) or {}
+        self.settings = {**DEFAULT_SETTINGS, **(load_section("settings", {}) or {})}
+        self.persisted = load_section("state", {}) or {}
         self.history: dict[str, list[int]] = {}
-        for k, v in (load_json(HISTORY_FILE, {}) or {}).items():
+        for k, v in (load_section("history", {}) or {}).items():
             if isinstance(v, list):
                 self.history[k] = [int(x) for x in v][-20:]
         self.blacklist: dict[str, int] = {}
         now = int(time.time())
-        for k, v in (load_json(BLACKLIST_FILE, {}) or {}).items():
+        for k, v in (load_section("blacklist", {}) or {}).items():
             try:
                 iv = int(v)
                 if iv > now:
@@ -859,6 +974,7 @@ class App(QMainWindow):
             f"background: {P['surface']};"
             f"color: {P['fg']};"
             f"border: 1px solid {P['border']};"
+            "border-radius: 8px;"
             "gridline-color: transparent;"
             "font-family: 'Segoe UI';"
             "font-size: 12px;"
@@ -869,6 +985,9 @@ class App(QMainWindow):
             f"color: {P['fg']};"
             "padding: 8px 12px;"
             "border: none;"
+            "}"
+            "QTableWidget::item:alternate {"
+            f"background: {P['bg_alt']};"
             "}"
             "QTableWidget::item:selected {"
             f"background: {P['surface3']};"
@@ -943,6 +1062,7 @@ class App(QMainWindow):
 
 
 
+
     def _kv(self, grid: QGridLayout, row: int, key: str, default: str, small: bool) -> QLabel:
         k = QLabel(key)
         k.setFont(QFont("Segoe UI Semibold", 9))
@@ -1012,6 +1132,7 @@ class App(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1036,7 +1157,7 @@ class App(QMainWindow):
         body_l.addWidget(self.table, 1)
 
         self.progress = QProgressBar()
-        self.progress.setFixedHeight(3)
+        self.progress.setFixedHeight(4)
         self.progress.setTextVisible(False)
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
@@ -1283,7 +1404,7 @@ class App(QMainWindow):
     def _unblacklist(self, ip: str) -> None:
         if ip in self.blacklist:
             del self.blacklist[ip]
-            save_json(BLACKLIST_FILE, {k: int(v) for k, v in self.blacklist.items()})
+            save_section("blacklist", {k: int(v) for k, v in self.blacklist.items()})
             self._set_status(f"unblacklisted {ip}", P["good"])
 
     # ------------------------------------------------------- status / visuals
@@ -1432,7 +1553,7 @@ class App(QMainWindow):
 
     def _add_blacklist(self, ip: str) -> None:
         self.blacklist[ip] = int(time.time()) + int(self.settings.get("blacklist_duration", 300))
-        save_json(BLACKLIST_FILE, {k: int(v) for k, v in self.blacklist.items()})
+        save_section("blacklist", {k: int(v) for k, v in self.blacklist.items()})
         log("BLKLST", f"blacklisted {ip}")
 
     def _finish_single(self, server: Server, ms: int) -> None:
@@ -1469,7 +1590,7 @@ class App(QMainWindow):
                 if cur >= int(self.settings.get("blacklist_threshold", 3)):
                     self._add_blacklist(server.primary)
 
-        save_json(HISTORY_FILE, self.history)
+        save_section("history", self.history)
         self.val_last.setText(datetime.now().strftime("%H:%M:%S"))
 
         successes.sort(key=lambda t: t[1])
@@ -1547,31 +1668,29 @@ class App(QMainWindow):
     def _apply_worker(self, server: Server,
                       then: Optional[Callable[[], None]]) -> None:
         try:
-            previous = get_current_dns()
+            snapshot = snapshot_dns()
             primary, secondary = self._resolve_pair(server)
             apply_dns(primary, secondary)
             time.sleep(0.4)
             ok = verify_dns()
             if ok:
                 mode = "mixed" if (self.mix_on and self.second is not None) else "single"
-                log("APPLY", f"{server.name} {primary}+{secondary} [{mode}] ok")
+                log("APPLY", f"{server.name} {primary}+{secondary} ok ({mode})")
                 self._post_call(lambda: self._apply_success(server, primary, secondary, mode))
             else:
-                log("APPLY", f"{server.name} verify=failed, reverted")
-                if previous:
-                    fb = previous[1] if (len(previous) > 1 and previous[1] and previous[1] != previous[0]) else str(self.settings.get("fallback_secondary", "1.0.0.1"))
-                    apply_dns(previous[0], fb)
+                log("APPLY", f"{server.name} verify=failed, restoring snapshot")
+                restore_dns(snapshot)
                 self._post_call(lambda: self._apply_failed(server))
         except Exception as e:
             log("ERROR", f"apply: {type(e).__name__}: {e}")
             self._post_call(lambda: self._set_status("apply error", P["bad"]))
             self._post_call(lambda: self.val_verify.setText("error"))
-            self._post_call(lambda: self.val_verify.setStyleSheet(
-                f"QLabel {{ color: {P['bad']}; background: transparent; }}"))
+            self._post_call(lambda: self.val_verify.setStyleSheet(self._kv_qss(P['bad'])))
         finally:
             self._post_call(lambda: self._set_busy(False))
             if then is not None:
                 self._post_call(then)
+
 
     def _apply_success(self, server: Server, primary: str,
                        secondary: str, mode: str) -> None:
@@ -1584,7 +1703,7 @@ class App(QMainWindow):
             "secondary": secondary, "mode": mode,
             "time": datetime.now().isoformat(),
         }
-        save_json(STATE_FILE, self.persisted)
+        save_section("state", self.persisted)
 
     def _apply_failed(self, server: Server) -> None:
         self.val_verify.setText("failed")
@@ -1604,8 +1723,8 @@ class App(QMainWindow):
     def _reset_worker(self) -> None:
         try:
             reset_dns()
-            time.sleep(0.5)
-            ok = verify_dns()
+            time.sleep(0.6)
+            ok = verify_auto()
             if ok:
                 log("RESET", "auto dns restored")
                 self._post_call(self._reset_success)
@@ -1620,13 +1739,14 @@ class App(QMainWindow):
         finally:
             self._post_call(lambda: self._set_busy(False))
 
+
     def _reset_success(self) -> None:
         self.val_verify.setText("auto")
         self.val_verify.setStyleSheet(self._kv_qss(P['good']))
         self.fastest = None
         self.second = None
         self.persisted.pop("last_apply", None)
-        save_json(STATE_FILE, self.persisted)
+        save_section("state", self.persisted)
         self._refresh_active()
         self._highlight_top2()
         self._set_status("dns auto", P["good"])
@@ -1646,7 +1766,7 @@ class App(QMainWindow):
         self.mix_on = not self.mix_on
         self._update_mix_visual()
         self.persisted["mix_on"] = self.mix_on
-        save_json(STATE_FILE, self.persisted)
+        save_section("state", self.persisted)
 
     def _toggle_auto(self) -> None:
         if self.busy:
@@ -1656,7 +1776,7 @@ class App(QMainWindow):
         if self._tray_auto is not None:
             self._tray_auto.setChecked(self.auto_on)
         self.persisted["auto_on"] = self.auto_on
-        save_json(STATE_FILE, self.persisted)
+        save_section("state", self.persisted)
         log("AUTO", f"toggled {'on' if self.auto_on else 'off'}")
 
         if self.auto_on:
@@ -1696,15 +1816,15 @@ class App(QMainWindow):
             return
         if seconds is None:
             seconds = int(self.settings.get("auto_interval_sec", 60))
-        if self._auto_timer is not None:
+        if self._auto_timer is None:
+            self._auto_timer = QTimer(self)
+            self._auto_timer.setSingleShot(True)
+            self._auto_timer.timeout.connect(self._auto_cycle)
+        else:
             self._auto_timer.stop()
-        self._auto_timer = QTimer(self)
-        self._auto_timer.setSingleShot(True)
-        self._auto_timer.timeout.connect(self._auto_cycle)
         self._auto_timer.start(max(1, seconds) * 1000)
         log("AUTO", f"next cycle in {seconds}s")
 
-    # ------------------------------------------------------- tray
 
     def _start_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1853,9 +1973,9 @@ class App(QMainWindow):
                 pass
         self.persisted["auto_on"] = self.auto_on
         self.persisted["mix_on"] = self.mix_on
-        save_json(STATE_FILE, self.persisted)
-        save_json(HISTORY_FILE, self.history)
-        save_json(SETTINGS_FILE, self.settings)
+        save_section("state", self.persisted)
+        save_section("history", self.history)
+        save_section("settings", self.settings)
         log("EXIT", "user exit")
         QApplication.quit()
 
