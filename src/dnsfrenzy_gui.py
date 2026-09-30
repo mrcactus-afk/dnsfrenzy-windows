@@ -1,7 +1,6 @@
-"""DNSFrenzy - Windows GUI.
+"""DNSFrenzy - Windows GUI (PyQt5).
 
 Pings DNS servers in parallel, applies the fastest one, verifies it.
-CustomTkinter + ttk.Treeview. Animated.
 """
 from __future__ import annotations
 
@@ -21,21 +20,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-import customtkinter as ctk
-import tkinter as tk
-from tkinter import Menu, filedialog, ttk
-
-try:
-    from PIL import Image, ImageDraw, ImageTk
-    HAS_PIL = True
-except Exception:
-    HAS_PIL = False
-
-try:
-    import pystray
-    HAS_TRAY = HAS_PIL
-except Exception:
-    HAS_TRAY = False
+from PyQt5.QtCore import (
+    Qt, QTimer, QPropertyAnimation, QEasingCurve, QEvent,
+)
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QBrush, QPen
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QMenu, QFileDialog, QSystemTrayIcon,
+    QProgressBar,
+)
 
 try:
     import winreg
@@ -123,23 +117,6 @@ DEFAULT_SETTINGS = {
 FAIL = 99999
 SPOOF_MS = 5
 FALLBACK_NAME = "Fallback"
-
-FONT = {
-    "title":   ("Segoe UI Semibold", 20),
-    "tag":     ("Segoe UI", 11),
-    "chip":    ("Segoe UI Semibold", 10),
-    "section": ("Segoe UI Semibold", 10),
-    "count":   ("Segoe UI", 10),
-    "cell":    ("Segoe UI", 11),
-    "head":    ("Segoe UI Semibold", 10),
-    "key":     ("Segoe UI Semibold", 9),
-    "val":     ("Consolas", 11),
-    "val_sm":  ("Consolas", 10),
-    "btn":     ("Segoe UI Semibold", 13),
-    "btn_sm":  ("Segoe UI Semibold", 11),
-}
-
-ROW_HEIGHT = 34
 
 _log_lock = threading.Lock()
 
@@ -390,6 +367,7 @@ def get_process_mem_mb() -> float:
         pass
     return -1.0
 
+
 def is_admin() -> bool:
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -405,24 +383,25 @@ def relaunch_as_admin() -> None:
 PUMP_INTERVAL_MS = 40
 
 
-class App(ctk.CTk):
-    def __init__(self) -> None:
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
-        super().__init__(fg_color=P["bg"])
+def _excepthook(exc_type, exc_val, exc_tb):
+    text = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
+    log("EXC", text.replace("\n", " | "))
 
-        self._post: queue.Queue[Callable[[], None]] = queue.Queue()
+
+class App(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self._post: queue.Queue = queue.Queue()
         self._pump_running = True
 
-        self.title("DNSFrenzy")
-        self.minsize(540, 620)
+        self.setWindowTitle("DNSFrenzy")
+        self.setMinimumSize(540, 620)
+        self.resize(680, 800)
         self._center_window(680, 800)
-        self.configure(fg_color=P["bg"])
-        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
-        self.bind("<Unmap>", self._on_unmap)
+        self.setWindowOpacity(0.0)
 
-        self.settings: dict = {**DEFAULT_SETTINGS, **(load_json(SETTINGS_FILE, {}) or {})}
-        self.persisted: dict = load_json(STATE_FILE, {}) or {}
+        self.settings = {**DEFAULT_SETTINGS, **(load_json(SETTINGS_FILE, {}) or {})}
+        self.persisted = load_json(STATE_FILE, {}) or {}
         self.history: dict[str, list[int]] = {}
         for k, v in (load_json(HISTORY_FILE, {}) or {}).items():
             if isinstance(v, list):
@@ -444,69 +423,165 @@ class App(ctk.CTk):
         self.mix_on = bool(self.persisted.get("mix_on", True))
         self.auto_on = bool(self.persisted.get("auto_on", False))
         self.exiting = False
-        self._auto_job: Optional[str] = None
-        self._pulse_job: Optional[str] = None
+
+        self._pump_timer: Optional[QTimer] = None
+        self._mem_timer: Optional[QTimer] = None
+        self._pulse_timer: Optional[QTimer] = None
+        self._flash_timer: Optional[QTimer] = None
+        self._scan_timer: Optional[QTimer] = None
+        self._auto_timer: Optional[QTimer] = None
+        self._fade_anim: Optional[QPropertyAnimation] = None
         self._pulse_on = False
-        self._flash_job: Optional[str] = None
-        self._fade_job: Optional[str] = None
-        self._scan_job: Optional[str] = None
-        self._mem_job: Optional[str] = None
-        self.tray_icon = None
-        self._icon_photo = None
-        self._row_tags: dict[str, str] = {}
+        self._pulse_phase = 0
+        self._pulse_color = P["warn"]
+        self._flash_row = -1
+        self._flash_count = 0
+        self._scan_phase = 0.0
+        self._row_by_name: dict[str, int] = {}
+        self._row_tag: dict[str, str] = {}
+        self.tray_icon: Optional[QSystemTrayIcon] = None
+        self._tray_auto = None
+        self._tray_startup = None
 
-        self.report_callback_exception = self._on_tk_exception
-
-        self._setup_tree_style()
         self._build_ui()
+        self._apply_window_icon()
         self._reload_servers()
         self._refresh_active()
         self._update_mix_visual()
         self._update_auto_visual()
         self._set_status("ready", P["fg_dim"])
 
-        try:
-            self.attributes("-alpha", 0.0)
-        except tk.TclError:
-            pass
+        self._pump_timer = QTimer(self)
+        self._pump_timer.timeout.connect(self._pump)
+        self._pump_timer.start(PUMP_INTERVAL_MS)
 
-        self.after(60, self._apply_icon)
-        self.after(60, self._pump)
-        self.after(120, self._start_tray)
-        self.after(160, self._post_startup)
-        self.after(200, lambda: self._fade_in(0.0))
-        self.after(1000, self._update_mem)
+        self._mem_timer = QTimer(self)
+        self._mem_timer.timeout.connect(self._update_mem)
+        self._mem_timer.start(2000)
 
-        log("START", f"launch mix={self.mix_on} auto={self.auto_on} admin={is_admin()} tray={HAS_TRAY}")
+        QTimer.singleShot(120, self._start_tray)
+        QTimer.singleShot(160, self._post_startup)
+        QTimer.singleShot(200, self._start_fade_in)
+
+        log("START", f"launch mix={self.mix_on} auto={self.auto_on} admin={is_admin()} tray=Qt")
 
     def _center_window(self, w: int, h: int) -> None:
-        self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        w = min(w, sw - 80)
-        h = min(h, sh - 120)
-        x = max(0, (sw - w) // 2)
-        y = max(0, (sh - h) // 2 - 30)
-        self.geometry(f"{w}x{h}+{x}+{y}")
-
-    # ---------------------------------------------------------- runtime
-
-    def _update_mem(self) -> None:
-        if self.exiting:
+        scr = QApplication.primaryScreen()
+        if scr is None:
             return
+        geo = scr.availableGeometry()
+        w = min(w, max(400, geo.width() - 80))
+        h = min(h, max(400, geo.height() - 120))
+        self.resize(w, h)
+        x = max(geo.x(), geo.x() + (geo.width() - w) // 2)
+        y = max(geo.y(), geo.y() + (geo.height() - h) // 2 - 30)
+        self.move(x, y)
+
+    def _make_icon_pixmap(self, size: int) -> QPixmap:
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(88, 166, 255)))
+        p.drawEllipse(1, 1, size - 2, size - 2)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(13, 17, 23), max(1, size // 10)))
+        inset = int(size * 0.34)
+        p.drawEllipse(inset, inset, size - inset * 2, size - inset * 2)
+        p.end()
+        return pix
+
+    def _apply_window_icon(self) -> None:
         try:
-            mb = get_process_mem_mb()
-            self.val_mem.configure(text=f"{mb:.0f} MB" if mb >= 0 else "-")
-        except tk.TclError:
+            self.setWindowIcon(QIcon(self._make_icon_pixmap(64)))
+        except Exception as e:
+            log("ICON", str(e))
+
+    # ------------------------------------------------------- animation
+
+    def _start_fade_in(self) -> None:
+        try:
+            self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self._fade_anim.setDuration(280)
+            self._fade_anim.setStartValue(0.0)
+            self._fade_anim.setEndValue(1.0)
+            self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._fade_anim.start()
+        except Exception as e:
+            log("FADE", str(e))
+            self.setWindowOpacity(1.0)
+
+    def _pulse_start(self) -> None:
+        if self._pulse_on:
             return
-        self._mem_job = self.after(2000, self._update_mem)
-    def _on_tk_exception(self, exc, val, tb) -> None:
-        text = "".join(traceback.format_exception(exc, val, tb))
-        log("TK-EXC", text.replace("\n", " | "))
-        try:
-            self._set_status("ui error (see log)", P["bad"])
-        except Exception:
-            pass
+        self._pulse_on = True
+        self._pulse_phase = 0
+        if self._pulse_timer is None:
+            self._pulse_timer = QTimer(self)
+            self._pulse_timer.timeout.connect(self._pulse_tick)
+        self._pulse_timer.start(400)
+
+    def _pulse_stop(self) -> None:
+        self._pulse_on = False
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+
+    def _pulse_tick(self) -> None:
+        if not self._pulse_on or self.exiting:
+            return
+        phase = self._pulse_phase % 2
+        color = self._pulse_color if phase == 0 else P["warn_dark"]
+        self.status_chip.setStyleSheet(self._chip_qss(color))
+        self._pulse_phase += 1
+
+    def _flash_winner(self) -> None:
+        if self.fastest is None or self.fastest.name == FALLBACK_NAME:
+            return
+        row = self._row_by_name.get(self.fastest.name)
+        if row is None:
+            return
+        self._flash_row = row
+        self._flash_count = 0
+        if self._flash_timer is None:
+            self._flash_timer = QTimer(self)
+            self._flash_timer.timeout.connect(self._flash_step)
+        self._flash_timer.start(160)
+        self._flash_step()
+
+    def _flash_step(self) -> None:
+        if self.exiting or self._flash_row < 0:
+            if self._flash_timer is not None:
+                self._flash_timer.stop()
+            return
+        hi = self._flash_count % 2 == 0
+        bg = P["good_bg_hi"] if hi else P["good_bg"]
+        self._set_row_bg(self._flash_row, bg)
+        self._flash_count += 1
+        if self._flash_count >= 6:
+            if self._flash_timer is not None:
+                self._flash_timer.stop()
+            self._set_row_bg(self._flash_row, P["good_bg"])
+
+    def _scan_bar_start(self) -> None:
+        self._scan_phase = 0.0
+        if self._scan_timer is None:
+            self._scan_timer = QTimer(self)
+            self._scan_timer.timeout.connect(self._scan_tick)
+        self._scan_timer.start(30)
+
+    def _scan_stop(self) -> None:
+        if self._scan_timer is not None:
+            self._scan_timer.stop()
+        self._set_progress(0.0)
+
+    def _scan_tick(self) -> None:
+        if self.exiting or not self.busy:
+            return
+        self._scan_phase = (self._scan_phase + 0.04) % 1.0
+        self._set_progress(self._scan_phase)
+
+    # ------------------------------------------------------- pump
 
     def _post_call(self, fn: Callable[[], None]) -> None:
         self._post.put(fn)
@@ -514,396 +589,406 @@ class App(ctk.CTk):
     def _pump(self) -> None:
         if not self._pump_running:
             return
-        try:
-            for _ in range(200):
-                try:
-                    fn = self._post.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    fn()
-                except Exception as e:
-                    log("PUMP", f"{type(e).__name__}: {e}")
-        finally:
+        for _ in range(200):
             try:
-                self.after(PUMP_INTERVAL_MS, self._pump)
-            except tk.TclError:
-                pass
+                fn = self._post.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                log("PUMP", f"{type(e).__name__}: {e}")
 
-    def _apply_icon(self) -> None:
-        if not HAS_PIL:
+    def _update_mem(self) -> None:
+        if self.exiting:
             return
-        try:
-            img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            d.ellipse((2, 2, 29, 29), fill=(88, 166, 255, 255))
-            d.ellipse((11, 11, 20, 20), outline=(13, 17, 23, 255), width=3)
-            self._icon_photo = ImageTk.PhotoImage(img)
-            self.iconphoto(True, self._icon_photo)
-        except Exception as e:
-            log("ICON", str(e))
+        mb = get_process_mem_mb()
+        self.val_mem.setText(f"{mb:.0f} MB" if mb >= 0 else "-")
 
     def _post_startup(self) -> None:
         try:
-            self.deiconify()
-            self.lift()
-            self.focus_force()
-        except tk.TclError:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
             pass
         if self.auto_on:
-            self.after(500, self._auto_cycle)
+            QTimer.singleShot(500, self._auto_cycle)
 
-    # -------------------------------------------------------- animations
+    # ------------------------------------------------------- styling
 
-    def _fade_in(self, a: float) -> None:
-        try:
-            a = min(1.0, a + 0.10)
-            self.attributes("-alpha", a)
-            if a < 1.0 and not self.exiting:
-                self._fade_job = self.after(16, lambda: self._fade_in(a))
-        except tk.TclError:
-            pass
-
-    def _pulse_start(self) -> None:
-        if self._pulse_on:
-            return
-        self._pulse_on = True
-        self._pulse_phase = 0
-        self._pulse_tick()
-
-    def _pulse_stop(self) -> None:
-        self._pulse_on = False
-        if self._pulse_job:
-            try:
-                self.after_cancel(self._pulse_job)
-            except tk.TclError:
-                pass
-            self._pulse_job = None
-
-    def _pulse_tick(self) -> None:
-        if not self._pulse_on or self.exiting:
-            return
-        try:
-            cur = self.status_chip.cget("fg")
-        except tk.TclError:
-            return
-        phase = self._pulse_phase % 2
-        on_color = getattr(self, "_pulse_color", P["warn"])
-        color = on_color if phase == 0 else P["warn_dark"]
-        try:
-            self.status_chip.configure(fg=color)
-        except tk.TclError:
-            pass
-        self._pulse_phase += 1
-        self._pulse_job = self.after(400, self._pulse_tick)
-
-    def _flash_winner(self) -> None:
-        if self.fastest is None or self.fastest.name == FALLBACK_NAME:
-            return
-        iid = self.fastest.name
-        if not self.tree.exists(iid):
-            return
-        if self._flash_job:
-            try:
-                self.after_cancel(self._flash_job)
-            except tk.TclError:
-                pass
-            self._flash_job = None
-        self._flash_step(iid, 0)
-
-    def _flash_step(self, iid: str, count: int) -> None:
-        if self.exiting or not self.tree.exists(iid):
-            return
-        hi = count % 2 == 0
-        bg = P["good_bg_hi"] if hi else P["good_bg"]
-        try:
-            self.tree.tag_configure("winner", background=bg, foreground=P["fg"])
-            self.tree.item(iid, tags=("winner",))
-        except tk.TclError:
-            return
-        if count < 5:
-            self._flash_job = self.after(160, lambda: self._flash_step(iid, count + 1))
-        else:
-            try:
-                self.tree.tag_configure("winner", background=P["good_bg"], foreground=P["fg"])
-            except tk.TclError:
-                pass
-            self._flash_job = None
-
-    def _scan_bar_start(self) -> None:
-        self._scan_phase = 0
-        self._scan_tick()
-
-    def _scan_stop(self) -> None:
-        if self._scan_job:
-            try:
-                self.after_cancel(self._scan_job)
-            except tk.TclError:
-                pass
-            self._scan_job = None
-        self._set_progress(0.0)
-
-    def _scan_tick(self) -> None:
-        if self.exiting or not self.busy:
-            return
-        self._scan_phase = (getattr(self, "_scan_phase", 0) + 0.04) % 1.0
-        try:
-            self.progress_fill.place_configure(relwidth=self._scan_phase)
-        except tk.TclError:
-            return
-        self._scan_job = self.after(30, self._scan_tick)
-
-    # ------------------------------------------------------------ style
-
-    def _setup_tree_style(self) -> None:
-        try:
-            style = ttk.Style(self)
-            style.theme_use("clam")
-        except Exception:
-            style = ttk.Style(self)
-
-        style.configure(
-            "DF.Treeview",
-            background=P["surface"],
-            fieldbackground=P["surface"],
-            foreground=P["fg"],
-            borderwidth=0,
-            relief="flat",
-            rowheight=ROW_HEIGHT,
-            font=FONT["cell"],
-        )
-        style.configure(
-            "DF.Treeview.Heading",
-            background=P["bg"],
-            foreground=P["fg_dim"],
-            borderwidth=0,
-            relief="flat",
-            padding=(10, 8),
-            font=FONT["head"],
-        )
-        style.map(
-            "DF.Treeview",
-            background=[("selected", P["surface3"])],
-            foreground=[("selected", P["fg"])],
-        )
-        style.map(
-            "DF.Treeview.Heading",
-            background=[("active", P["bg"])],
-            foreground=[("active", P["fg"])],
-        )
-        style.layout("DF.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
-
-        style.configure(
-            "DF.Vertical.TScrollbar",
-            background=P["surface2"],
-            troughcolor=P["surface"],
-            bordercolor=P["surface"],
-            arrowcolor=P["fg_dim"],
-            darkcolor=P["surface2"],
-            lightcolor=P["surface2"],
-            gripcount=0,
-            relief="flat",
-        )
-        style.map(
-            "DF.Vertical.TScrollbar",
-            background=[("active", P["accent"])],
+    def _chip_qss(self, color: str) -> str:
+        return (
+            "QLabel {"
+            f"background: {P['surface2']};"
+            f"color: {color};"
+            "padding: 6px 12px;"
+            "font-family: 'Segoe UI Semibold';"
+            "font-size: 11px;"
+            "}"
         )
 
-    # ------------------------------------------------------------ layout
+    def _menu_qss(self) -> str:
+        return (
+            "QMenu {"
+            f"background: {P['surface']};"
+            f"color: {P['fg']};"
+            f"border: 1px solid {P['border']};"
+            "font-family: 'Segoe UI';"
+            "font-size: 11px;"
+            "padding: 4px;"
+            "}"
+            "QMenu::item { padding: 6px 22px; }"
+            "QMenu::item:selected {"
+            f"background: {P['accent']};"
+            "color: #ffffff;"
+            "}"
+            "QMenu::separator {"
+            f"background: {P['border']};"
+            "height: 1px;"
+            "margin: 4px 8px;"
+            "}"
+        )
+
+    def _table_qss(self) -> str:
+        return (
+            "QTableWidget {"
+            f"background: {P['surface']};"
+            f"color: {P['fg']};"
+            f"border: 1px solid {P['border']};"
+            "gridline-color: transparent;"
+            "font-family: 'Segoe UI';"
+            "font-size: 11px;"
+            "}"
+            "QTableWidget::item {"
+            f"background: {P['surface']};"
+            f"color: {P['fg']};"
+            "padding: 6px 10px;"
+            "border: none;"
+            "}"
+            "QTableWidget::item:selected {"
+            f"background: {P['surface3']};"
+            f"color: {P['fg']};"
+            "}"
+            "QHeaderView::section {"
+            f"background: {P['bg']};"
+            f"color: {P['fg_dim']};"
+            "border: none;"
+            "padding: 8px 10px;"
+            "font-family: 'Segoe UI Semibold';"
+            "font-size: 10px;"
+            "}"
+            "QTableCornerButton::section {"
+            f"background: {P['bg']};"
+            "border: none;"
+            "}"
+            "QScrollBar:vertical {"
+            f"background: {P['surface']};"
+            "width: 12px;"
+            "margin: 0;"
+            "border: none;"
+            f"border-left: 1px solid {P['surface2']};"
+            "}"
+            "QScrollBar::handle:vertical {"
+            f"background: {P['border']};"
+            "min-height: 28px;"
+            "border-radius: 4px;"
+            "margin: 3px;"
+            "}"
+            "QScrollBar::handle:vertical:hover {"
+            f"background: {P['accent']};"
+            "}"
+            "QScrollBar::handle:vertical:pressed {"
+            f"background: {P['accent_hi']};"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "height: 0;"
+            "background: none;"
+            "border: none;"
+            "}"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            "background: none;"
+            "}"
+            "QScrollBar:horizontal {"
+            f"background: {P['surface']};"
+            "height: 12px;"
+            "margin: 0;"
+            "border: none;"
+            f"border-top: 1px solid {P['surface2']};"
+            "}"
+            "QScrollBar::handle:horizontal {"
+            f"background: {P['border']};"
+            "min-width: 28px;"
+            "border-radius: 4px;"
+            "margin: 3px;"
+            "}"
+            "QScrollBar::handle:horizontal:hover {"
+            f"background: {P['accent']};"
+            "}"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {"
+            "width: 0;"
+            "background: none;"
+            "border: none;"
+            "}"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {"
+            "background: none;"
+            "}"
+        )
+
+
+    def _kv(self, grid: QGridLayout, row: int, key: str, default: str, small: bool) -> QLabel:
+        k = QLabel(key)
+        k.setFont(QFont("Segoe UI Semibold", 9))
+        k.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
+        v = QLabel(default)
+        v.setFont(QFont("Consolas", 10 if small else 11))
+        v.setStyleSheet(f"QLabel {{ color: {P['fg']}; background: transparent; }}")
+        grid.addWidget(k, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(v, row, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        return v
+
+    # ------------------------------------------------------- UI build
 
     def _build_ui(self) -> None:
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        central = QWidget(self)
+        central.setStyleSheet(f"QWidget {{ background: {P['bg']}; }}")
+        self.setCentralWidget(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        tk.Frame(self, bg=P["accent"], height=3).grid(row=0, column=0, sticky="ew")
+        accent = QFrame()
+        accent.setFixedHeight(3)
+        accent.setStyleSheet(f"QFrame {{ background: {P['accent']}; }}")
+        outer.addWidget(accent)
 
-        body = tk.Frame(self, bg=P["bg"])
-        body.grid(row=1, column=0, sticky="nsew")
-        body.grid_rowconfigure(1, weight=1)
-        body.grid_columnconfigure(0, weight=1)
+        header = QFrame()
+        header.setFixedHeight(96)
+        header.setStyleSheet(f"QFrame {{ background: {P['surface']}; }}")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(22, 0, 22, 0)
+        hl.setSpacing(0)
 
-        header = tk.Frame(body, bg=P["surface"], height=96)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        header.grid_columnconfigure(1, weight=1)
+        diamond = QLabel("\u25C6")
+        diamond.setFont(QFont("Segoe UI", 28))
+        diamond.setStyleSheet(f"QLabel {{ color: {P['accent']}; background: transparent; }}")
+        hl.addWidget(diamond, 0, Qt.AlignVCenter)
 
-        diamond = tk.Label(header, text="\u25C6", font=("Segoe UI", 28),
-                           bg=P["surface"], fg=P["accent"])
-        diamond.grid(row=0, column=0, rowspan=2, padx=(22, 14), pady=(0, 6), sticky="w")
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(14, 22, 0, 20)
+        title_col.setSpacing(0)
+        title = QLabel("DNSFrenzy")
+        title.setFont(QFont("Segoe UI Semibold", 20))
+        title.setStyleSheet(f"QLabel {{ color: {P['fg']}; background: transparent; }}")
+        subtitle = QLabel("Fastest DNS auto-switcher")
+        subtitle.setFont(QFont("Segoe UI", 11))
+        subtitle.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        hl.addLayout(title_col)
+        hl.addStretch(1)
 
-        tk.Label(header, text="DNSFrenzy", font=FONT["title"],
-                 bg=P["surface"], fg=P["fg"], anchor="w").grid(
-            row=0, column=1, sticky="sw", pady=(22, 0))
+        self.status_chip = QLabel("  READY  ")
+        self.status_chip.setAlignment(Qt.AlignCenter)
+        self.status_chip.setStyleSheet(self._chip_qss(P["fg_dim"]))
+        hl.addWidget(self.status_chip, 0, Qt.AlignVCenter)
+        outer.addWidget(header)
 
-        tk.Label(header, text="Fastest DNS auto-switcher", font=FONT["tag"],
-                 bg=P["surface"], fg=P["fg_dim"], anchor="w").grid(
-            row=1, column=1, sticky="nw", pady=(0, 20))
+        body = QWidget()
+        body.setStyleSheet(f"QWidget {{ background: {P['bg']}; }}")
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(18, 14, 18, 8)
+        body_l.setSpacing(8)
 
-        self.status_chip = tk.Label(
-            header, text="  READY  ", font=FONT["chip"],
-            bg=P["surface2"], fg=P["fg_dim"], padx=12, pady=6,
+        tb = QHBoxLayout()
+        tb.setSpacing(0)
+        lbl_sec = QLabel("SERVERS")
+        lbl_sec.setFont(QFont("Segoe UI Semibold", 10))
+        lbl_sec.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
+        tb.addWidget(lbl_sec)
+        tb.addStretch(1)
+        self.lbl_count = QLabel("")
+        self.lbl_count.setFont(QFont("Segoe UI", 10))
+        self.lbl_count.setStyleSheet(f"QLabel {{ color: {P['fg_sub']}; background: transparent; }}")
+        tb.addWidget(self.lbl_count)
+        body_l.addLayout(tb)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["SERVER", "LATENCY", "AVG", "STATUS", "IP"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setStyleSheet(self._table_qss())
+        self.table.setWordWrap(False)
+        hh = self.table.horizontalHeader()
+        hh.setHighlightSections(False)
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.Fixed)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.setColumnWidth(1, 100)
+        self.table.setColumnWidth(2, 80)
+        self.table.setColumnWidth(3, 80)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.table.doubleClicked.connect(self._on_table_double)
+        self.table.setMinimumHeight(260)
+        body_l.addWidget(self.table, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setFixedHeight(3)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.setStyleSheet(
+            "QProgressBar {"
+            f"background: {P['surface2']};"
+            "border: none;"
+            "}"
+            "QProgressBar::chunk {"
+            f"background: {P['accent']};"
+            "}"
         )
-        self.status_chip.grid(row=0, column=2, rowspan=2, padx=(8, 22), sticky="e")
+        body_l.addWidget(self.progress)
 
-        body_inner = tk.Frame(body, bg=P["bg"])
-        body_inner.grid(row=1, column=0, sticky="nsew", padx=18, pady=(14, 8))
-        body_inner.grid_rowconfigure(2, weight=1)
-        body_inner.grid_columnconfigure(0, weight=1)
+        outer.addWidget(body, 1)
 
-        toolbar = tk.Frame(body_inner, bg=P["bg"])
-        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        toolbar.grid_columnconfigure(1, weight=1)
-        tk.Label(toolbar, text="SERVERS", font=FONT["section"],
-                 bg=P["bg"], fg=P["fg_dim"]).grid(row=0, column=0, sticky="w")
-        self.lbl_count = tk.Label(toolbar, text="", font=FONT["count"],
-                                  bg=P["bg"], fg=P["fg_sub"])
-        self.lbl_count.grid(row=0, column=2, sticky="e")
+        bottom = QWidget()
+        bottom.setStyleSheet(f"QWidget {{ background: {P['bg']}; }}")
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(18, 6, 18, 14)
+        bl.setSpacing(8)
 
-        self.progress_bg = tk.Frame(body_inner, bg=P["surface2"], height=3)
-        self.progress_bg.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        self.progress_bg.grid_propagate(False)
-        self.progress_fill = tk.Frame(self.progress_bg, bg=P["accent"], height=3)
-        self.progress_fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+        self.btn_mix = QPushButton("")
+        self.btn_mix.setFixedHeight(38)
+        self.btn_mix.setCursor(Qt.PointingHandCursor)
+        self.btn_mix.clicked.connect(self._toggle_mix)
+        bl.addWidget(self.btn_mix)
 
-        tree_wrap = tk.Frame(body_inner, bg=P["border"], bd=0, highlightthickness=0)
-        tree_wrap.grid(row=2, column=0, sticky="nsew")
-        tree_wrap.grid_rowconfigure(0, weight=1)
-        tree_wrap.grid_columnconfigure(0, weight=1)
+        info = QFrame()
+        info.setFixedHeight(112)
+        info.setStyleSheet(f"QFrame {{ background: {P['surface']}; }}")
+        il = QHBoxLayout(info)
+        il.setContentsMargins(16, 14, 16, 14)
+        il.setSpacing(28)
 
-        self.tree = ttk.Treeview(
-            tree_wrap,
-            style="DF.Treeview",
-            columns=("name", "lat", "avg", "st", "ip"),
-            show="headings",
-            selectmode="browse",
+        left_col = QGridLayout()
+        left_col.setHorizontalSpacing(14)
+        left_col.setVerticalSpacing(6)
+        self.val_active = self._kv(left_col, 0, "ACTIVE", "-", small=False)
+        self.val_fastest = self._kv(left_col, 1, "FASTEST", "-", small=False)
+        self.val_second = self._kv(left_col, 2, "RUNNER-UP", "-", small=False)
+        left_col.setColumnStretch(1, 1)
+
+        right_col = QGridLayout()
+        right_col.setHorizontalSpacing(14)
+        right_col.setVerticalSpacing(6)
+        self.val_last = self._kv(right_col, 0, "LAST", "never", small=True)
+        self.val_verify = self._kv(right_col, 1, "VERIFY", "-", small=True)
+        self.val_mem = self._kv(right_col, 2, "MEM", "-", small=True)
+        right_col.setColumnStretch(1, 1)
+
+        il.addLayout(left_col, 1)
+        il.addLayout(right_col, 1)
+        bl.addWidget(info)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(12)
+
+        self.btn_test = QPushButton("Run test")
+        self.btn_test.setFixedHeight(44)
+        self.btn_test.setCursor(Qt.PointingHandCursor)
+        self.btn_test.setStyleSheet(
+            "QPushButton {"
+            f"background: {P['accent']};"
+            "color: #071426;"
+            f"border: 1px solid {P['accent_dn']};"
+            "border-radius: 10px;"
+            "font-family: 'Segoe UI Semibold';"
+            "font-size: 13px;"
+            "}"
+            "QPushButton:hover {"
+            f"background: {P['accent_hi']};"
+            "}"
+            "QPushButton:disabled {"
+            f"background: {P['surface2']};"
+            f"color: {P['fg_sub']};"
+            "border: 1px solid " + P['border'] + ";"
+            "}"
         )
-        self.tree.heading("name", text="SERVER", anchor="w")
-        self.tree.heading("lat", text="LATENCY", anchor="w")
-        self.tree.heading("avg", text="AVG", anchor="w")
-        self.tree.heading("st", text="STATUS", anchor="w")
-        self.tree.heading("ip", text="IP", anchor="w")
+        self.btn_test.clicked.connect(lambda: self._run_test())
 
-        self.tree.column("name", width=180, minwidth=120, stretch=True, anchor="w")
-        self.tree.column("lat", width=100, minwidth=85, stretch=False, anchor="w")
-        self.tree.column("avg", width=80, minwidth=70, stretch=False, anchor="w")
-        self.tree.column("st", width=80, minwidth=70, stretch=False, anchor="w")
-        self.tree.column("ip", width=140, minwidth=100, stretch=True, anchor="w")
-
-        vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
-                            command=self.tree.yview, style="DF.Vertical.TScrollbar")
-        self.tree.configure(yscrollcommand=vsb.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=(1, 1))
-        vsb.grid(row=0, column=1, sticky="ns", pady=(1, 1), padx=(0, 1))
-
-        self.tree.tag_configure("winner", background=P["good_bg"], foreground=P["fg"])
-        self.tree.tag_configure("second", background=P["row_2nd"], foreground=P["fg"])
-        self.tree.tag_configure("spoof", foreground=P["purple"])
-        self.tree.tag_configure("fail", foreground=P["fg_sub"])
-        self.tree.tag_configure("slow", foreground=P["bad"])
-
-        self.tree.bind("<Button-3>", self._on_tree_right_click)
-        self.tree.bind("<Double-1>", self._on_tree_double)
-
-        bottom = tk.Frame(self, bg=P["bg"])
-        bottom.grid(row=2, column=0, sticky="ew", padx=18, pady=(6, 14))
-        bottom.grid_columnconfigure(0, weight=1)
-
-        self.btn_mix = ctk.CTkButton(
-            bottom, text="", height=38,
-            font=FONT["btn_sm"],
-            fg_color=P["surface2"], hover_color=P["surface3"],
-            text_color=P["fg_dim"], corner_radius=8, anchor="w",
-            command=self._toggle_mix,
+        self.btn_apply = QPushButton("Apply fastest")
+        self.btn_apply.setFixedHeight(44)
+        self.btn_apply.setCursor(Qt.PointingHandCursor)
+        self.btn_apply.setStyleSheet(
+            "QPushButton {"
+            f"background: {P['surface2']};"
+            f"color: {P['fg']};"
+            f"border: 1px solid {P['border']};"
+            "border-radius: 10px;"
+            "font-family: 'Segoe UI Semibold';"
+            "font-size: 13px;"
+            "}"
+            "QPushButton:hover {"
+            f"background: {P['surface3']};"
+            "}"
+            "QPushButton:disabled {"
+            f"background: {P['surface2']};"
+            f"color: {P['fg_sub']};"
+            "}"
         )
-        self.btn_mix.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.btn_apply.clicked.connect(lambda: self._run_apply())
 
-        info = tk.Frame(bottom, bg=P["surface"], height=112)
-        info.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        info.grid_propagate(False)
-        info.grid_rowconfigure(0, weight=1)
-        info.grid_columnconfigure(0, weight=1, minsize=280)
-        info.grid_columnconfigure(1, weight=1)
+        self.btn_auto = QPushButton("Auto: OFF")
+        self.btn_auto.setFixedHeight(44)
+        self.btn_auto.setCursor(Qt.PointingHandCursor)
+        self.btn_auto.clicked.connect(self._toggle_auto)
 
-        left = tk.Frame(info, bg=P["surface"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(16, 8), pady=14)
-        left.grid_columnconfigure(1, weight=1)
+        actions.addWidget(self.btn_test, 1)
+        actions.addWidget(self.btn_apply, 1)
+        actions.addWidget(self.btn_auto, 1)
+        bl.addLayout(actions)
 
-        def kv(parent, row, key, value_default, val_font):
-            tk.Label(parent, text=key, font=FONT["key"],
-                     bg=P["surface"], fg=P["fg_dim"], anchor="w").grid(
-                row=row, column=0, sticky="w", pady=(0, 6))
-            v = tk.Label(parent, text=value_default, font=val_font,
-                         bg=P["surface"], fg=P["fg"], anchor="w")
-            v.grid(row=row, column=1, sticky="w", padx=(14, 0), pady=(0, 6))
-            return v
-
-        self.val_active = kv(left, 0, "ACTIVE", "-", FONT["val"])
-        self.val_fastest = kv(left, 1, "FASTEST", "-", FONT["val"])
-        self.val_second = kv(left, 2, "RUNNER-UP", "-", FONT["val"])
-
-        right = tk.Frame(info, bg=P["surface"])
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 16), pady=14)
-        right.grid_columnconfigure(1, weight=1)
-
-        self.val_last = kv(right, 0, "LAST", "never", FONT["val_sm"])
-        self.val_verify = kv(right, 1, "VERIFY", "-", FONT["val_sm"])
-        self.val_mem = kv(right, 2, "MEM", "-", FONT["val_sm"])
-
-        actions = tk.Frame(bottom, bg=P["bg"])
-        actions.grid(row=2, column=0, sticky="ew")
-        for i in range(3):
-            actions.grid_columnconfigure(i, weight=1, uniform="act")
-
-        self.btn_test = ctk.CTkButton(
-            actions, text="Run test", height=44,
-            font=FONT["btn"],
-            fg_color=P["accent"], hover_color=P["accent_hi"],
-            text_color="#071426", corner_radius=10,
-            command=lambda: self._run_test(),
-        )
-        self.btn_test.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        self.btn_apply = ctk.CTkButton(
-            actions, text="Apply fastest", height=44,
-            font=FONT["btn"],
-            fg_color=P["surface2"], hover_color=P["surface3"],
-            text_color=P["fg"], corner_radius=10,
-            command=lambda: self._run_apply(),
-        )
-        self.btn_apply.grid(row=0, column=1, sticky="ew", padx=6)
-
-        self.btn_auto = ctk.CTkButton(
-            actions, text="Auto: OFF", height=44,
-            font=FONT["btn"],
-            fg_color=P["surface2"], hover_color=P["surface3"],
-            text_color=P["fg"], corner_radius=10,
-            command=self._toggle_auto,
-        )
-        self.btn_auto.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        outer.addWidget(bottom)
 
         self._set_busy(False)
 
-    # ---------------------------------------------------------- rows
+    # ------------------------------------------------------- rows
 
     def _reload_servers(self) -> None:
         self.servers = read_servers()
-        self._rebuild_tree()
+        self._rebuild_table()
 
-    def _rebuild_tree(self) -> None:
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        self._row_tags.clear()
+    def _new_cell(self, text: str) -> QTableWidgetItem:
+        item = QTableWidgetItem(text)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        item.setForeground(QColor(P["fg"]))
+        item.setBackground(QColor(P["surface"]))
+        return item
+
+    def _rebuild_table(self) -> None:
+        self.table.setRowCount(0)
+        self._row_by_name.clear()
+        self._row_tag.clear()
 
         for s in self.servers:
-            avg = self._avg_text(s.name)
-            iid = self.tree.insert(
-                "", "end", iid=s.name,
-                values=(s.name, "-", avg, "", s.primary),
-            )
-            self._row_tags[iid] = ""
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setRowHeight(row, 34)
+            self._row_by_name[s.name] = row
+            self._row_tag[s.name] = ""
+            self.table.setItem(row, 0, self._new_cell(s.name))
+            self.table.setItem(row, 1, self._new_cell("-"))
+            self.table.setItem(row, 2, self._new_cell(self._avg_text(s.name)))
+            self.table.setItem(row, 3, self._new_cell(""))
+            self.table.setItem(row, 4, self._new_cell(s.primary))
 
-        self.lbl_count.configure(text=f"{len(self.servers)} servers")
+        self.lbl_count.setText(f"{len(self.servers)} servers")
         self._highlight_top2()
 
     def _avg_text(self, name: str) -> str:
@@ -912,75 +997,113 @@ class App(ctk.CTk):
             return "-"
         return f"{int(sum(h) / len(h))} ms"
 
-    def _set_tree_values(self, iid: str, lat: str = None, avg: str = None,
-                         st: str = None, ip: str = None) -> None:
-        if not self.tree.exists(iid):
+    def _set_row_values(self, name: str, lat: Optional[str] = None,
+                        avg: Optional[str] = None, st: Optional[str] = None,
+                        ip: Optional[str] = None) -> None:
+        row = self._row_by_name.get(name)
+        if row is None:
             return
-        cur = list(self.tree.item(iid, "values"))
-        if len(cur) < 5:
-            cur = (iid, "-", "-", "", "")[:5]
-        if lat is not None: cur[1] = lat
-        if avg is not None: cur[2] = avg
-        if st is not None: cur[3] = st
-        if ip is not None: cur[4] = ip
-        self.tree.item(iid, values=tuple(cur))
+        if lat is not None:
+            it = self.table.item(row, 1)
+            if it: it.setText(lat)
+        if avg is not None:
+            it = self.table.item(row, 2)
+            if it: it.setText(avg)
+        if st is not None:
+            it = self.table.item(row, 3)
+            if it: it.setText(st)
+        if ip is not None:
+            it = self.table.item(row, 4)
+            if it: it.setText(ip)
 
-    def _set_row_tag(self, iid: str, tag: str) -> None:
-        if not self.tree.exists(iid):
+    def _set_row_bg(self, row: int, hex_color: str) -> None:
+        c = QColor(hex_color)
+        for col in range(self.table.columnCount()):
+            it = self.table.item(row, col)
+            if it is not None:
+                it.setBackground(c)
+
+    def _set_row_fg(self, row: int, hex_color: str) -> None:
+        c = QColor(hex_color)
+        for col in range(self.table.columnCount()):
+            it = self.table.item(row, col)
+            if it is not None:
+                it.setForeground(c)
+
+    def _set_row_tag(self, name: str, tag: str) -> None:
+        row = self._row_by_name.get(name)
+        if row is None:
             return
-        self._row_tags[iid] = tag
-        self.tree.item(iid, tags=(tag,) if tag else ())
+        self._row_tag[name] = tag
+        if tag == "winner":
+            self._set_row_bg(row, P["good_bg"]); self._set_row_fg(row, P["fg"])
+        elif tag == "second":
+            self._set_row_bg(row, P["row_2nd"]); self._set_row_fg(row, P["fg"])
+        elif tag == "spoof":
+            self._set_row_bg(row, P["surface"]); self._set_row_fg(row, P["purple"])
+        elif tag == "fail":
+            self._set_row_bg(row, P["surface"]); self._set_row_fg(row, P["fg_sub"])
+        elif tag == "slow":
+            self._set_row_bg(row, P["surface"]); self._set_row_fg(row, P["bad"])
+        else:
+            self._set_row_bg(row, P["surface"]); self._set_row_fg(row, P["fg"])
 
     def _highlight_top2(self) -> None:
         fast = self.fastest.name if self.fastest else None
         sec = self.second.name if self.second else None
-        for iid in self.tree.get_children():
-            if iid == fast:
-                self._set_row_tag(iid, "winner")
-            elif iid == sec:
-                self._set_row_tag(iid, "second")
-            elif self._row_tags.get(iid) in ("winner", "second"):
-                self._set_row_tag(iid, "")
+        for name in list(self._row_by_name.keys()):
+            if name == fast:
+                self._set_row_tag(name, "winner")
+            elif name == sec:
+                self._set_row_tag(name, "second")
+            elif self._row_tag.get(name) in ("winner", "second"):
+                self._set_row_tag(name, "")
 
-    def _on_tree_right_click(self, event) -> None:
-        iid = self.tree.identify_row(event.y)
-        if not iid:
+    def _name_at_row(self, row: int) -> Optional[str]:
+        for n, r in self._row_by_name.items():
+            if r == row:
+                return n
+        return None
+
+    def _on_table_context_menu(self, pos) -> None:
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
             return
-        self.tree.selection_set(iid)
-        server = next((s for s in self.servers if s.name == iid), None)
+        row = idx.row()
+        name = self._name_at_row(row)
+        if name is None:
+            return
+        server = next((s for s in self.servers if s.name == name), None)
         if server is None:
             return
+        self.table.selectRow(row)
+        m = QMenu(self)
+        m.setStyleSheet(self._menu_qss())
+        a1 = m.addAction("Test this server only")
+        a2 = m.addAction("Apply this server")
+        a3 = m.addAction("Copy IP")
+        m.addSeparator()
+        a4 = m.addAction("Remove from blacklist")
+        a1.triggered.connect(lambda: self._run_test(single=server))
+        a2.triggered.connect(lambda: self._run_apply(force=server))
+        a3.triggered.connect(lambda: self._copy_ip(server.primary))
+        a4.triggered.connect(lambda: self._unblacklist(server.primary))
+        m.exec_(self.table.viewport().mapToGlobal(pos))
 
-        m = Menu(self, tearoff=0, bg=P["surface"], fg=P["fg"],
-                 activebackground=P["accent"], activeforeground="#ffffff",
-                 borderwidth=0, font=FONT["cell"])
-        m.add_command(label="Test this server only",
-                      command=lambda: self._run_test(single=server))
-        m.add_command(label="Apply this server",
-                      command=lambda: self._run_apply(force=server))
-        m.add_command(label="Copy IP",
-                      command=lambda: self._copy_ip(server.primary))
-        m.add_separator()
-        m.add_command(label="Remove from blacklist",
-                      command=lambda: self._unblacklist(server.primary))
-        try:
-            m.tk_popup(event.x_root, event.y_root)
-        finally:
-            m.grab_release()
-
-    def _on_tree_double(self, event) -> None:
-        iid = self.tree.identify_row(event.y)
-        if not iid:
+    def _on_table_double(self, idx) -> None:
+        if not idx.isValid():
             return
-        server = next((s for s in self.servers if s.name == iid), None)
+        name = self._name_at_row(idx.row())
+        if name is None:
+            return
+        server = next((s for s in self.servers if s.name == name), None)
         if server is not None:
             self._run_test(single=server)
 
     def _copy_ip(self, ip: str) -> None:
         try:
-            self.clipboard_clear()
-            self.clipboard_append(ip)
-        except tk.TclError:
+            QApplication.clipboard().setText(ip)
+        except Exception:
             pass
 
     def _unblacklist(self, ip: str) -> None:
@@ -989,13 +1112,11 @@ class App(ctk.CTk):
             save_json(BLACKLIST_FILE, {k: int(v) for k, v in self.blacklist.items()})
             self._set_status(f"unblacklisted {ip}", P["good"])
 
-    # -------------------------------------------------------- status
+    # ------------------------------------------------------- status / visuals
 
     def _set_status(self, text: str, color: str, pulse: bool = False) -> None:
-        try:
-            self.status_chip.configure(text=f"  {text.upper()}  ", fg=color)
-        except tk.TclError:
-            return
+        self.status_chip.setText(f"  {text.upper()}  ")
+        self.status_chip.setStyleSheet(self._chip_qss(color))
         if pulse:
             self._pulse_color = color
             self._pulse_start()
@@ -1004,70 +1125,106 @@ class App(ctk.CTk):
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        state = "normal" if not busy else "disabled"
         for b in (self.btn_test, self.btn_auto, self.btn_mix):
-            try:
-                b.configure(state=state)
-            except tk.TclError:
-                pass
-        try:
-            if busy:
-                self.btn_apply.configure(state="disabled")
-            else:
-                self.btn_apply.configure(state="normal" if self.fastest else "disabled")
-        except tk.TclError:
-            pass
+            b.setEnabled(not busy)
+        self.btn_apply.setEnabled((not busy) and self.fastest is not None)
         if busy:
             self._scan_bar_start()
         else:
             self._scan_stop()
-        if self.tray_icon is not None:
-            try:
-                self.tray_icon.update_menu()
-            except Exception:
-                pass
 
     def _set_progress(self, frac: float) -> None:
         frac = max(0.0, min(1.0, frac))
-        try:
-            self.progress_fill.place_configure(relwidth=frac)
-        except tk.TclError:
-            pass
+        self.progress.setValue(int(frac * 1000))
 
     def _update_mix_visual(self) -> None:
-        try:
-            if self.mix_on:
-                self.btn_mix.configure(
-                    text="  MIX TOP 2     primary from #1  \u00b7  secondary from #2",
-                    fg_color=P["purple_bg"], hover_color=P["purple_hi"],
-                    text_color=P["purple"], anchor="w",
-                )
-            else:
-                self.btn_mix.configure(
-                    text="  MIX TOP 2     same provider for both slots",
-                    fg_color=P["surface2"], hover_color=P["surface3"],
-                    text_color=P["fg_dim"], anchor="w",
-                )
-        except tk.TclError:
-            pass
+        if self.mix_on:
+            self.btn_mix.setText("  MIX TOP 2     primary from #1  \u00b7  secondary from #2")
+            self.btn_mix.setStyleSheet(
+                "QPushButton {"
+                f"background: {P['purple_bg']};"
+                f"color: {P['purple']};"
+                f"border: 1px solid {P['purple_hi']};"
+                "border-radius: 8px;"
+                "text-align: left;"
+                "padding: 0 14px;"
+                "font-family: 'Segoe UI Semibold';"
+                "font-size: 11px;"
+                "}"
+                "QPushButton:hover {"
+                f"background: {P['purple_hi']};"
+                "}"
+                "QPushButton:disabled {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg_sub']};"
+                "border: 1px solid " + P['border'] + ";"
+                "}"
+            )
+        else:
+            self.btn_mix.setText("  MIX TOP 2     same provider for both slots")
+            self.btn_mix.setStyleSheet(
+                "QPushButton {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg_dim']};"
+                f"border: 1px solid {P['border']};"
+                "border-radius: 8px;"
+                "text-align: left;"
+                "padding: 0 14px;"
+                "font-family: 'Segoe UI Semibold';"
+                "font-size: 11px;"
+                "}"
+                "QPushButton:hover {"
+                f"background: {P['surface3']};"
+                "}"
+                "QPushButton:disabled {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg_sub']};"
+                "}"
+            )
 
     def _update_auto_visual(self) -> None:
-        try:
-            if self.auto_on:
-                self.btn_auto.configure(text="Auto: ON", fg_color=P["auto_bg"],
-                                        hover_color=P["surface3"], text_color=P["good"])
-            else:
-                self.btn_auto.configure(text="Auto: OFF", fg_color=P["surface2"],
-                                        hover_color=P["surface3"], text_color=P["fg"])
-        except tk.TclError:
-            pass
+        if self.auto_on:
+            self.btn_auto.setText("Auto: ON")
+            self.btn_auto.setStyleSheet(
+                "QPushButton {"
+                f"background: {P['auto_bg']};"
+                f"color: {P['good']};"
+                f"border: 1px solid {P['good_bg_hi']};"
+                "border-radius: 10px;"
+                "font-family: 'Segoe UI Semibold';"
+                "font-size: 13px;"
+                "}"
+                "QPushButton:hover {"
+                f"background: {P['good_bg_hi']};"
+                "}"
+                "QPushButton:disabled {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg_sub']};"
+                "}"
+            )
+        else:
+            self.btn_auto.setText("Auto: OFF")
+            self.btn_auto.setStyleSheet(
+                "QPushButton {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg']};"
+                f"border: 1px solid {P['border']};"
+                "border-radius: 10px;"
+                "font-family: 'Segoe UI Semibold';"
+                "font-size: 13px;"
+                "}"
+                "QPushButton:hover {"
+                f"background: {P['surface3']};"
+                "}"
+                "QPushButton:disabled {"
+                f"background: {P['surface2']};"
+                f"color: {P['fg_sub']};"
+                "}"
+            )
 
     def _refresh_active(self) -> None:
         addrs = get_current_dns()
-        try:
-            self.val_active.configure(text=", ".join(addrs) if addrs else "-")
-        except tk.TclError:
-            pass
+        self.val_active.setText(", ".join(addrs) if addrs else "-")
 
     # ------------------------------------------------------- test flow
 
@@ -1124,30 +1281,28 @@ class App(ctk.CTk):
                 self._post_call(then)
 
     def _prepare_rows_for_test(self) -> None:
-        try:
-            self.val_second.configure(text="-")
-        except tk.TclError:
-            pass
-        for iid in self.tree.get_children():
-            self._set_tree_values(iid, lat="...", st="")
-            self._set_row_tag(iid, "")
+        self.val_second.setText("-")
+        for name in list(self._row_by_name.keys()):
+            self._set_row_values(name, lat="...", st="")
+            self._set_row_tag(name, "")
 
     def _on_row_result(self, server: Server, ms: int, done: int, total: int) -> None:
         self._apply_row_latency(server, ms)
 
     def _apply_row_latency(self, server: Server, ms: int) -> None:
-        iid = server.name
-        if not self.tree.exists(iid):
+        if server.name not in self._row_by_name:
             return
         if ms == FAIL:
-            self._set_tree_values(iid, lat="FAIL", st="blk" if self._is_blacklisted(server.primary) else "")
-            self._set_row_tag(iid, "fail")
+            self._set_row_values(server.name, lat="FAIL",
+                                 st="blk" if self._is_blacklisted(server.primary) else "")
+            self._set_row_tag(server.name, "fail")
         elif ms <= SPOOF_MS:
-            self._set_tree_values(iid, lat="spoof", st="spoof")
-            self._set_row_tag(iid, "spoof")
+            self._set_row_values(server.name, lat="spoof", st="spoof")
+            self._set_row_tag(server.name, "spoof")
         else:
-            self._set_tree_values(iid, lat=f"{ms} ms", st="slow" if ms >= 150 else "")
-            self._set_row_tag(iid, "slow" if ms >= 150 else "")
+            self._set_row_values(server.name, lat=f"{ms} ms",
+                                 st="slow" if ms >= 150 else "")
+            self._set_row_tag(server.name, "slow" if ms >= 150 else "")
 
     def _is_blacklisted(self, ip: str) -> bool:
         exp = self.blacklist.get(ip)
@@ -1170,7 +1325,7 @@ class App(ctk.CTk):
             log("TEST1", f"{server.name} FAIL")
             return
         self._push_history(server.name, ms)
-        self._set_tree_values(server.name, avg=self._avg_text(server.name))
+        self._set_row_values(server.name, avg=self._avg_text(server.name))
         self._set_status(f"{server.name}: {ms} ms", P["good"])
         log("TEST1", f"{server.name} {ms} ms")
 
@@ -1188,7 +1343,7 @@ class App(ctk.CTk):
             ms = int(results.get(server.name, FAIL))
             if ms != FAIL and ms > SPOOF_MS:
                 self._push_history(server.name, ms)
-                self._set_tree_values(server.name, avg=self._avg_text(server.name))
+                self._set_row_values(server.name, avg=self._avg_text(server.name))
                 successes.append((server, ms))
                 fail_counts[server.primary] = 0
             else:
@@ -1198,48 +1353,30 @@ class App(ctk.CTk):
                     self._add_blacklist(server.primary)
 
         save_json(HISTORY_FILE, self.history)
-        try:
-            self.val_last.configure(text=datetime.now().strftime("%H:%M:%S"))
-        except tk.TclError:
-            pass
+        self.val_last.setText(datetime.now().strftime("%H:%M:%S"))
 
         successes.sort(key=lambda t: t[1])
 
         if successes:
             self.fastest = successes[0][0]
-            try:
-                self.val_fastest.configure(text=f"{self.fastest.name}  ({successes[0][1]} ms)")
-            except tk.TclError:
-                pass
+            self.val_fastest.setText(f"{self.fastest.name}  ({successes[0][1]} ms)")
         elif self.settings.get("fallback_chain", True):
             self.fastest = Server(
                 FALLBACK_NAME,
                 str(self.settings.get("fallback_primary", "1.1.1.1")),
                 str(self.settings.get("fallback_secondary", "1.0.0.1")),
             )
-            try:
-                self.val_fastest.configure(text=f"Fallback  ({self.fastest.primary})")
-            except tk.TclError:
-                pass
+            self.val_fastest.setText(f"Fallback  ({self.fastest.primary})")
         else:
             self.fastest = None
-            try:
-                self.val_fastest.configure(text="none reachable")
-            except tk.TclError:
-                pass
+            self.val_fastest.setText("none reachable")
 
         if len(successes) >= 2:
             self.second = successes[1][0]
-            try:
-                self.val_second.configure(text=f"{self.second.name}  ({successes[1][1]} ms)")
-            except tk.TclError:
-                pass
+            self.val_second.setText(f"{self.second.name}  ({successes[1][1]} ms)")
         else:
             self.second = None
-            try:
-                self.val_second.configure(text="-")
-            except tk.TclError:
-                pass
+            self.val_second.setText("-")
 
         self._highlight_top2()
         self._flash_winner()
@@ -1285,10 +1422,8 @@ class App(ctk.CTk):
             self.second = None
             self._highlight_top2()
         self._set_busy(True)
-        try:
-            self.val_verify.configure(text="...", fg=P["warn"])
-        except tk.TclError:
-            pass
+        self.val_verify.setText("...")
+        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['warn']}; background: transparent; }}")
         self._set_status("applying", P["warn"], pulse=True)
         threading.Thread(target=self._apply_worker, args=(target, then), daemon=True).start()
 
@@ -1307,12 +1442,15 @@ class App(ctk.CTk):
             else:
                 log("APPLY", f"{server.name} verify=failed, reverted")
                 if previous:
-                    apply_dns(previous[0], (previous[1] if (len(previous) > 1 and previous[1] and previous[1] != previous[0]) else str(self.settings.get("fallback_secondary", "1.0.0.1"))))
+                    fb = previous[1] if (len(previous) > 1 and previous[1] and previous[1] != previous[0]) else str(self.settings.get("fallback_secondary", "1.0.0.1"))
+                    apply_dns(previous[0], fb)
                 self._post_call(lambda: self._apply_failed(server))
         except Exception as e:
             log("ERROR", f"apply: {type(e).__name__}: {e}")
             self._post_call(lambda: self._set_status("apply error", P["bad"]))
-            self._post_call(lambda: self.val_verify.configure(text="error", fg=P["bad"]))
+            self._post_call(lambda: self.val_verify.setText("error"))
+            self._post_call(lambda: self.val_verify.setStyleSheet(
+                f"QLabel {{ color: {P['bad']}; background: transparent; }}"))
         finally:
             self._post_call(lambda: self._set_busy(False))
             if then is not None:
@@ -1320,10 +1458,8 @@ class App(ctk.CTk):
 
     def _apply_success(self, server: Server, primary: str,
                        secondary: str, mode: str) -> None:
-        try:
-            self.val_verify.configure(text="ok", fg=P["good"])
-        except tk.TclError:
-            pass
+        self.val_verify.setText("ok")
+        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['good']}; background: transparent; }}")
         self._refresh_active()
         self._set_status(f"applied ({mode})", P["good"])
         self.persisted["last_apply"] = {
@@ -1334,14 +1470,12 @@ class App(ctk.CTk):
         save_json(STATE_FILE, self.persisted)
 
     def _apply_failed(self, server: Server) -> None:
-        try:
-            self.val_verify.configure(text="failed", fg=P["bad"])
-        except tk.TclError:
-            pass
+        self.val_verify.setText("failed")
+        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['bad']}; background: transparent; }}")
         self._refresh_active()
         self._set_status("reverted (verify failed)", P["bad"])
 
-    # --------------------------------------------------------- toggles
+    # ------------------------------------------------------- toggles
 
     def _toggle_mix(self) -> None:
         if self.busy:
@@ -1356,6 +1490,8 @@ class App(ctk.CTk):
             return
         self.auto_on = not self.auto_on
         self._update_auto_visual()
+        if self._tray_auto is not None:
+            self._tray_auto.setChecked(self.auto_on)
         self.persisted["auto_on"] = self.auto_on
         save_json(STATE_FILE, self.persisted)
         log("AUTO", f"toggled {'on' if self.auto_on else 'off'}")
@@ -1365,12 +1501,8 @@ class App(ctk.CTk):
             self._set_status(f"auto \u00b7 {interval}s", P["good"])
             self._auto_cycle()
         else:
-            if self._auto_job:
-                try:
-                    self.after_cancel(self._auto_job)
-                except tk.TclError:
-                    pass
-                self._auto_job = None
+            if self._auto_timer is not None:
+                self._auto_timer.stop()
             self._set_status("idle", P["fg_dim"])
 
     def _auto_cycle(self) -> None:
@@ -1401,73 +1533,79 @@ class App(ctk.CTk):
             return
         if seconds is None:
             seconds = int(self.settings.get("auto_interval_sec", 60))
-        if self._auto_job:
-            try:
-                self.after_cancel(self._auto_job)
-            except tk.TclError:
-                pass
-        self._auto_job = self.after(max(1, seconds) * 1000, self._auto_cycle)
+        if self._auto_timer is not None:
+            self._auto_timer.stop()
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.timeout.connect(self._auto_cycle)
+        self._auto_timer.start(max(1, seconds) * 1000)
         log("AUTO", f"next cycle in {seconds}s")
 
-    # ----------------------------------------------------------- tray
+    # ------------------------------------------------------- tray
 
     def _start_tray(self) -> None:
-        if not HAS_TRAY:
-            log("TRAY", "pystray unavailable, tray disabled")
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            log("TRAY", "system tray not available")
             return
         try:
-            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            d.ellipse((0, 0, 63, 63), fill=(88, 166, 255, 255))
-            d.ellipse((18, 18, 46, 46), outline=(13, 17, 23, 255), width=6)
+            icon = QIcon(self._make_icon_pixmap(64))
+            self.tray_icon = QSystemTrayIcon(icon, self)
+            self.tray_icon.setToolTip("DNSFrenzy")
 
-            def wrap(fn):
-                return lambda icon, item: self._post_call(fn)
+            m = QMenu()
+            m.setStyleSheet(self._menu_qss())
 
-            def auto_checked(item):
-                return self.auto_on
+            a_show = m.addAction("Show")
+            m.addSeparator()
+            a_test = m.addAction("Run test now")
+            a_apply = m.addAction("Apply fastest")
+            self._tray_auto = m.addAction("Auto refresh")
+            self._tray_auto.setCheckable(True)
+            self._tray_auto.setChecked(self.auto_on)
+            self._tray_startup = m.addAction("Start with Windows")
+            self._tray_startup.setCheckable(True)
+            self._tray_startup.setChecked(get_autostart())
+            m.addSeparator()
+            a_exp = m.addAction("Export config...")
+            a_imp = m.addAction("Import config...")
+            a_log = m.addAction("Open log file")
+            m.addSeparator()
+            a_exit = m.addAction("Exit")
 
-            def startup_checked(item):
-                return get_autostart()
+            a_show.triggered.connect(self._restore)
+            a_test.triggered.connect(lambda: self._run_test())
+            a_apply.triggered.connect(lambda: self._run_apply())
+            self._tray_auto.triggered.connect(self._toggle_auto)
+            self._tray_startup.triggered.connect(self._toggle_startup)
+            a_exp.triggered.connect(self._export_config)
+            a_imp.triggered.connect(self._import_config)
+            a_log.triggered.connect(self._open_log)
+            a_exit.triggered.connect(self._exit_app)
 
-            menu = pystray.Menu(
-                pystray.MenuItem("Show", wrap(self._restore), default=True),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Run test now", wrap(lambda: self._run_test())),
-                pystray.MenuItem("Apply fastest", wrap(lambda: self._run_apply())),
-                pystray.MenuItem("Auto refresh", wrap(self._toggle_auto), checked=auto_checked),
-                pystray.MenuItem("Start with Windows",
-                                 wrap(self._toggle_startup), checked=startup_checked),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Export config...", wrap(self._export_config)),
-                pystray.MenuItem("Import config...", wrap(self._import_config)),
-                pystray.MenuItem("Open log file", wrap(self._open_log)),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Exit", wrap(self._exit_app)),
-            )
-            self.tray_icon = pystray.Icon("DNSFrenzy", img, "DNSFrenzy", menu)
-            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            self.tray_icon.setContextMenu(m)
+            self.tray_icon.activated.connect(self._on_tray_activate)
+            self.tray_icon.show()
             log("TRAY", "started")
         except Exception as e:
             log("TRAY", f"failed: {type(e).__name__}: {e}")
             self.tray_icon = None
 
+    def _on_tray_activate(self, reason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore()
+
     def _toggle_startup(self) -> None:
         set_autostart(not get_autostart())
-        if self.tray_icon is not None:
-            try:
-                self.tray_icon.update_menu()
-            except Exception:
-                pass
+        if self._tray_startup is not None:
+            self._tray_startup.setChecked(get_autostart())
 
     # ------------------------------------------------------- file ops
 
     def _export_config(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Export DNSFrenzy config",
-            defaultextension=".zip",
-            filetypes=[("DNSFrenzy config", "*.zip")],
-            initialfile=f"dnsfrenzy-config-{datetime.now():%Y%m%d}.zip",
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export DNSFrenzy config",
+            f"dnsfrenzy-config-{datetime.now():%Y%m%d}.zip",
+            "DNSFrenzy config (*.zip)",
         )
         if not path:
             return
@@ -1485,9 +1623,8 @@ class App(ctk.CTk):
             self._set_status(f"export failed: {e}", P["bad"])
 
     def _import_config(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Import DNSFrenzy config",
-            filetypes=[("DNSFrenzy config", "*.zip")],
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import DNSFrenzy config", "", "DNSFrenzy config (*.zip)",
         )
         if not path:
             return
@@ -1510,54 +1647,43 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-    # ------------------------------------------------------ lifecycle
+    # ------------------------------------------------------- lifecycle
 
     def _restore(self) -> None:
-        try:
-            self.deiconify()
-            self.state("normal")
-            self.lift()
-            self.focus_force()
-        except tk.TclError:
-            pass
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
-    def _on_unmap(self, event) -> None:
+    def changeEvent(self, e) -> None:
+        if e.type() == QEvent.WindowStateChange:
+            if self.isMinimized() and self.tray_icon is not None:
+                QTimer.singleShot(10, self.hide)
+        super().changeEvent(e)
+
+    def closeEvent(self, e) -> None:
         if self.exiting:
-            return
-        self.after(30, self._check_minimized)
-
-    def _check_minimized(self) -> None:
-        try:
-            if self.state() == "iconic" and self.tray_icon is not None:
-                self.withdraw()
-        except tk.TclError:
-            pass
-
-    def _on_close_request(self) -> None:
-        if self.exiting:
-            self.destroy()
+            e.accept()
             return
         if self.tray_icon is None:
+            e.ignore()
             self._exit_app()
             return
-        try:
-            self.withdraw()
-        except tk.TclError:
-            self._exit_app()
+        e.ignore()
+        self.hide()
 
     def _exit_app(self) -> None:
         self.exiting = True
         self._pump_running = False
-        for job in (self._auto_job, self._pulse_job, self._flash_job, self._mem_job,
-                    self._fade_job, self._scan_job):
-            if job:
+        for t in (self._pump_timer, self._mem_timer, self._pulse_timer,
+                  self._flash_timer, self._scan_timer, self._auto_timer):
+            if t is not None:
                 try:
-                    self.after_cancel(job)
-                except tk.TclError:
+                    t.stop()
+                except Exception:
                     pass
         if self.tray_icon is not None:
             try:
-                self.tray_icon.stop()
+                self.tray_icon.hide()
             except Exception:
                 pass
         self.persisted["auto_on"] = self.auto_on
@@ -1566,10 +1692,7 @@ class App(ctk.CTk):
         save_json(HISTORY_FILE, self.history)
         save_json(SETTINGS_FILE, self.settings)
         log("EXIT", "user exit")
-        try:
-            self.destroy()
-        except tk.TclError:
-            pass
+        QApplication.quit()
 
 
 def main() -> None:
@@ -1577,8 +1700,13 @@ def main() -> None:
         log("START", "not admin, relaunching with UAC")
         relaunch_as_admin()
         sys.exit(0)
-    app = App()
-    app.mainloop()
+    sys.excepthook = _excepthook
+    app = QApplication(sys.argv)
+    app.setApplicationName("DNSFrenzy")
+    app.setQuitOnLastWindowClosed(False)
+    win = App()
+    win.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
