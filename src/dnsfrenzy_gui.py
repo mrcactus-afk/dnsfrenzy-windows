@@ -300,6 +300,16 @@ def apply_dns(primary: str, secondary: str) -> None:
     _ps(ps, timeout=20)
 
 
+def reset_dns() -> None:
+    ps = (
+        "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "
+        "Set-DnsClientServerAddress -InterfaceAlias $_.Name "
+        "-ResetServerAddresses -ErrorAction SilentlyContinue }; "
+        "ipconfig /flushdns | Out-Null"
+    )
+    _ps(ps, timeout=20)
+
+
 def verify_dns() -> bool:
     ip = _ps(
         "(Resolve-DnsName digikala.com -Type A -DnsOnly "
@@ -787,6 +797,7 @@ class App(QMainWindow):
             "auto_off":  (P['surface2'],  P['fg'],        P['border'],      P['surface3'],   P['border_hi'],   P['surface3']),
             "mix_on":    (P['purple_bg'], P['purple'],    P['purple_hi'],   P['purple_hi'],  P['purple_hi'],   P['purple_bg']),
             "mix_off":   (P['surface2'],  P['fg_dim'],    P['border'],      P['surface3'],   P['border_hi'],   P['surface3']),
+            "reset":     (P['surface2'],  P['warn'],      P['border'],      P['surface3'],   P['warn_dark'],   P['surface3']),
         }
         bg, fg, bd, hov, hov_bd, pressed = palette[role]
         return (
@@ -1104,9 +1115,16 @@ class App(QMainWindow):
         self.btn_auto.setFixedHeight(44)
         self.btn_auto.setCursor(Qt.PointingHandCursor)
         self.btn_auto.clicked.connect(self._toggle_auto)
+        self.btn_reset = QPushButton("Reset to auto")
+        self.btn_reset.setFixedHeight(44)
+        self.btn_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_reset.setStyleSheet(self._btn_qss("reset"))
+        self.btn_reset.clicked.connect(lambda: self._run_reset())
+
 
         actions.addWidget(self.btn_test, 1)
         actions.addWidget(self.btn_apply, 1)
+        actions.addWidget(self.btn_reset, 1)
         actions.addWidget(self.btn_auto, 1)
         bl.addLayout(actions)
 
@@ -1291,7 +1309,7 @@ class App(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        for b in (self.btn_test, self.btn_auto, self.btn_mix):
+        for b in (self.btn_test, self.btn_auto, self.btn_mix, self.btn_reset):
             b.setEnabled(not busy)
         self.btn_apply.setEnabled((not busy) and self.fastest is not None)
         if busy:
@@ -1574,6 +1592,52 @@ class App(QMainWindow):
         self._refresh_active()
         self._set_status("reverted (verify failed)", P["bad"])
 
+    def _run_reset(self) -> None:
+        if self.busy:
+            return
+        self._set_busy(True)
+        self.val_verify.setText("...")
+        self.val_verify.setStyleSheet(self._kv_qss(P['warn']))
+        self._set_status("resetting", P["warn"], pulse=True)
+        threading.Thread(target=self._reset_worker, daemon=True).start()
+
+    def _reset_worker(self) -> None:
+        try:
+            reset_dns()
+            time.sleep(0.5)
+            ok = verify_dns()
+            if ok:
+                log("RESET", "auto dns restored")
+                self._post_call(self._reset_success)
+            else:
+                log("RESET", "verify=failed")
+                self._post_call(self._reset_failed)
+        except Exception as e:
+            log("ERROR", f"reset: {type(e).__name__}: {e}")
+            self._post_call(lambda: self._set_status("reset error", P["bad"]))
+            self._post_call(lambda: self.val_verify.setText("error"))
+            self._post_call(lambda: self.val_verify.setStyleSheet(self._kv_qss(P['bad'])))
+        finally:
+            self._post_call(lambda: self._set_busy(False))
+
+    def _reset_success(self) -> None:
+        self.val_verify.setText("auto")
+        self.val_verify.setStyleSheet(self._kv_qss(P['good']))
+        self.fastest = None
+        self.second = None
+        self.persisted.pop("last_apply", None)
+        save_json(STATE_FILE, self.persisted)
+        self._refresh_active()
+        self._highlight_top2()
+        self._set_status("dns auto", P["good"])
+
+    def _reset_failed(self) -> None:
+        self.val_verify.setText("failed")
+        self.val_verify.setStyleSheet(self._kv_qss(P['bad']))
+        self._refresh_active()
+        self._set_status("reset failed", P["bad"])
+
+
     # ------------------------------------------------------- toggles
 
     def _toggle_mix(self) -> None:
@@ -1658,6 +1722,8 @@ class App(QMainWindow):
             m.addSeparator()
             a_test = m.addAction("Run test now")
             a_apply = m.addAction("Apply fastest")
+            a_reset = m.addAction("Reset to automatic")
+            a_reset.triggered.connect(lambda: self._run_reset())
             self._tray_auto = m.addAction("Auto refresh")
             self._tray_auto.setCheckable(True)
             self._tray_auto.setChecked(self.auto_on)
