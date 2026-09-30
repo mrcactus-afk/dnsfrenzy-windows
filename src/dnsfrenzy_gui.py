@@ -391,19 +391,23 @@ def verify_dns() -> bool:
 
 def snapshot_dns() -> list:
     out = _ps(
-        "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "
-        "$a = Get-DnsClientServerAddress -InterfaceAlias $_.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue; "
-        "if ($a) { $addrs = @($a.ServerAddresses | Where-Object { $_ }); "
-        "'{0}|{1}' -f $_.Name, ($addrs -join ',') } }"
+        "$rows = @(); "
+        "foreach ($a in (Get-NetAdapter | Where-Object Status -eq 'Up')) { "
+        "$k = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $a.InterfaceGuid; "
+        "$ns = (Get-ItemProperty -Path $k -Name NameServer -ErrorAction SilentlyContinue).NameServer; "
+        "$dns = @((Get-DnsClientServerAddress -InterfaceAlias $a.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { $_ }); "
+        "$mode = if ([string]::IsNullOrWhiteSpace($ns)) { 'auto' } else { 'static' }; "
+        "$rows += ('{0}|{1}|{2}' -f $a.Name, $mode, ($dns -join ',')) "
+        "}; $rows -join \"`n\""
     )
     result = []
     for line in out.splitlines():
         line = line.strip()
-        if not line or "|" not in line:
+        if not line or line.count("|") < 2:
             continue
-        name, addrs = line.split("|", 1)
+        name, mode, addrs = line.split("|", 2)
         parts = [a.strip() for a in addrs.split(",") if a.strip()]
-        result.append((name.strip(), parts))
+        result.append((name.strip(), mode.strip(), parts))
     return result
 
 
@@ -411,25 +415,18 @@ def restore_dns(snapshot: list) -> None:
     if not snapshot:
         reset_dns()
         return
-    for name, addrs in snapshot:
-        if not addrs:
+    for name, mode, addrs in snapshot:
+        if mode == "auto" or not addrs:
             _ps(
                 "Set-DnsClientServerAddress -InterfaceAlias "
                 f"'{name}' -ResetServerAddresses -ErrorAction SilentlyContinue",
                 timeout=10,
             )
-            continue
-        if len(addrs) >= 2 and addrs[1] != addrs[0]:
-            _ps(
-                "Set-DnsClientServerAddress -InterfaceAlias "
-                f"'{name}' -ServerAddresses @('{addrs[0]}','{addrs[1]}') "
-                "-ErrorAction SilentlyContinue",
-                timeout=10,
-            )
         else:
+            quoted = ",".join(f"'{a}'" for a in addrs)
             _ps(
                 "Set-DnsClientServerAddress -InterfaceAlias "
-                f"'{name}' -ServerAddresses @('{addrs[0]}') "
+                f"'{name}' -ServerAddresses @({quoted}) "
                 "-ErrorAction SilentlyContinue",
                 timeout=10,
             )
@@ -438,12 +435,16 @@ def restore_dns(snapshot: list) -> None:
 
 def verify_auto() -> bool:
     out = _ps(
-        "Get-DnsClientServerAddress -AddressFamily IPv4 "
-        "-ErrorAction SilentlyContinue | "
-        "Where-Object { $_.ServerAddresses } | "
-        "Select-Object -First 1 -ExpandProperty ServerAddresses"
+        "$all = $true; "
+        "foreach ($a in (Get-NetAdapter | Where-Object Status -eq 'Up')) { "
+        "$k = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $a.InterfaceGuid; "
+        "$ns = (Get-ItemProperty -Path $k -Name NameServer -ErrorAction SilentlyContinue).NameServer; "
+        "if (-not [string]::IsNullOrWhiteSpace($ns)) { $all = $false; break } "
+        "}; if ($all) { 'AUTO' } else { 'STATIC' }"
     ).strip()
-    return not out
+    return out == "AUTO"
+
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "DNSFrenzy"
 
