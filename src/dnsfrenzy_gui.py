@@ -68,6 +68,15 @@ if ROOT is None:
 FROZEN = getattr(sys, "frozen", False)
 
 if FROZEN:
+    try:
+        _bundled = Path(getattr(sys, "_MEIPASS", "")) / "servers.txt"
+        _target = ROOT / "servers.txt"
+        if _bundled.is_file() and not _target.is_file():
+            _target.write_bytes(_bundled.read_bytes())
+    except Exception:
+        pass
+
+if FROZEN:
     CONFIG_DIR = ROOT
     DATA_DIR = ROOT
     SERVER_FILE = ROOT / "servers.txt"
