@@ -81,6 +81,7 @@ LOG_FILE = DATA_DIR / "dnsfrenzy.log"
 P = {
     "bg":         "#0a1220",
     "bg_alt":     "#0d1626",
+    "header_bg": "#000000",
     "surface":    "#111c30",
     "surface2":   "#172540",
     "surface3":   "#20324f",
@@ -391,6 +392,146 @@ PUMP_INTERVAL_MS = 40
 def _excepthook(exc_type, exc_val, exc_tb):
     text = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
     log("EXC", text.replace("\n", " | "))
+
+
+from PyQt5.QtGui import QPainter, QPainterPath, QPen, QBrush, QColor
+from PyQt5.QtCore import QPointF, QRectF
+import math
+
+
+class LogoWidget(QWidget):
+    STATE_IDLE = "idle"
+    STATE_SCANNING = "scanning"
+    STATE_CONNECTED = "connected"
+    STATE_DISCONNECTED = "disconnected"
+
+    def __init__(self, size: int = 56, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._size = size
+        self._state = self.STATE_IDLE
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(40)
+
+    def set_state(self, state: str) -> None:
+        if state == self._state:
+            return
+        self._state = state
+        self._phase = 0.0
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 0.025) % 1.0
+        self.update()
+
+    def _state_color(self) -> str:
+        if self._state == self.STATE_CONNECTED:
+            return P["good"]
+        if self._state == self.STATE_DISCONNECTED:
+            return P["bad"]
+        if self._state == self.STATE_SCANNING:
+            return P["warn"]
+        return P["accent"]
+
+    def _diamond_path(self, cx: float, cy: float, r: float) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(cx, cy - r)
+        path.lineTo(cx + r, cy)
+        path.lineTo(cx, cy + r)
+        path.lineTo(cx - r, cy)
+        path.closeSubpath()
+        return path
+
+    def _draw_diamond(self, p: QPainter, cx: float, cy: float, r: float,
+                      fill: QColor = None, stroke: QColor = None, width: int = 2) -> None:
+        if fill is not None:
+            p.setBrush(QBrush(fill))
+        else:
+            p.setBrush(Qt.NoBrush)
+        if stroke is not None:
+            pen = QPen(stroke)
+            pen.setWidth(width)
+            p.setPen(pen)
+        else:
+            p.setPen(Qt.NoPen)
+        p.drawPath(self._diamond_path(cx, cy, r))
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        base = self._size * 0.32
+        color = QColor(self._state_color())
+        s = self._state
+
+        if s == self.STATE_SCANNING:
+            self._paint_scanning(p, cx, cy, base, color)
+        elif s == self.STATE_CONNECTED:
+            self._paint_connected(p, cx, cy, base, color)
+        elif s == self.STATE_DISCONNECTED:
+            self._paint_disconnected(p, cx, cy, base, color)
+        else:
+            self._paint_idle(p, cx, cy, base, color)
+        p.end()
+
+    def _paint_idle(self, p, cx, cy, base, color) -> None:
+        glow = QColor(color)
+        glow.setAlpha(45)
+        self._draw_diamond(p, cx, cy, base * 1.3, glow, None)
+        fill = QColor(color)
+        fill.setAlpha(230)
+        self._draw_diamond(p, cx, cy, base, fill, color, 2)
+        core = QColor("#ffffff")
+        core.setAlpha(150)
+        self._draw_diamond(p, cx, cy, base * 0.3, core, None)
+
+    def _paint_scanning(self, p, cx, cy, base, color) -> None:
+        arc_r = base * 1.75
+        rect = QRectF(cx - arc_r, cy - arc_r, arc_r * 2, arc_r * 2)
+        back_pen = QPen(QColor(P["border_hi"]))
+        back_pen.setWidth(2)
+        p.setPen(back_pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(rect)
+        arc_pen = QPen(QColor(color))
+        arc_pen.setWidth(2)
+        arc_pen.setCapStyle(Qt.RoundCap)
+        p.setPen(arc_pen)
+        start = int(self._phase * 360 * 16)
+        span = int(110 * 16)
+        p.drawArc(rect, start, span)
+        pulse = 0.85 + 0.15 * math.sin(self._phase * 2 * math.pi)
+        fill = QColor(color)
+        fill.setAlpha(int(230 * pulse))
+        self._draw_diamond(p, cx, cy, base * pulse, fill, color, 2)
+
+    def _paint_connected(self, p, cx, cy, base, color) -> None:
+        pulse = 0.9 + 0.1 * math.sin(self._phase * 2 * math.pi)
+        glow = QColor(color)
+        glow.setAlpha(int(70 * pulse))
+        self._draw_diamond(p, cx, cy, base * 1.45 * pulse, glow, None)
+        fill = QColor(color)
+        self._draw_diamond(p, cx, cy, base, fill, color, 2)
+        core = QColor("#ffffff")
+        core.setAlpha(200)
+        self._draw_diamond(p, cx, cy, base * 0.35, core, None)
+
+    def _paint_disconnected(self, p, cx, cy, base, color) -> None:
+        fill = QColor(color)
+        fill.setAlpha(200)
+        self._draw_diamond(p, cx, cy, base, fill, color, 2)
+        pen = QPen(QColor("#ffffff"))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        d = base * 0.45
+        p.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
+        p.drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d))
 
 
 class App(QMainWindow):
@@ -817,30 +958,16 @@ class App(QMainWindow):
         outer.addWidget(accent)
 
         header = QFrame()
-        header.setFixedHeight(96)
+        header.setFixedHeight(88)
         header.setStyleSheet(
-            f"QFrame {{ background: {P['surface']}; border-bottom: 1px solid {P['border']}; }}")
+            f"QFrame {{ background: {P['header_bg']}; "
+            f"border-bottom: 1px solid {P['border']}; }}")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(22, 0, 22, 0)
-        hl.setSpacing(0)
+        hl.setSpacing(16)
 
-        diamond = QLabel("\u25C6")
-        diamond.setFont(QFont("Segoe UI", 28))
-        diamond.setStyleSheet(f"QLabel {{ color: {P['accent']}; background: transparent; }}")
-        hl.addWidget(diamond, 0, Qt.AlignVCenter)
-
-        title_col = QVBoxLayout()
-        title_col.setContentsMargins(14, 22, 0, 20)
-        title_col.setSpacing(0)
-        title = QLabel("DNSFrenzy")
-        title.setFont(QFont("Segoe UI Semibold", 20))
-        title.setStyleSheet(f"QLabel {{ color: {P['fg']}; background: transparent; }}")
-        subtitle = QLabel("Fastest DNS auto-switcher")
-        subtitle.setFont(QFont("Segoe UI", 11))
-        subtitle.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
-        title_col.addWidget(title)
-        title_col.addWidget(subtitle)
-        hl.addLayout(title_col)
+        self.logo = LogoWidget(size=56)
+        hl.addWidget(self.logo, 0, Qt.AlignVCenter)
         hl.addStretch(1)
 
         self.status_chip = QLabel("  READY  ")
@@ -986,6 +1113,7 @@ class App(QMainWindow):
         outer.addWidget(bottom)
 
         self._set_busy(False)
+
 
 
     def _reload_servers(self) -> None:
@@ -1150,6 +1278,16 @@ class App(QMainWindow):
             self._pulse_start()
         else:
             self._pulse_stop()
+        if hasattr(self, "logo"):
+            if pulse:
+                self.logo.set_state(LogoWidget.STATE_SCANNING)
+            elif color == P["good"]:
+                self.logo.set_state(LogoWidget.STATE_CONNECTED)
+            elif color == P["bad"]:
+                self.logo.set_state(LogoWidget.STATE_DISCONNECTED)
+            else:
+                self.logo.set_state(LogoWidget.STATE_IDLE)
+
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
