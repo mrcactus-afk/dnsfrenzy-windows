@@ -79,23 +79,28 @@ LOG_FILE = DATA_DIR / "dnsfrenzy.log"
 
 
 P = {
-    "bg":         "#071426",
-    "surface":    "#0e2038",
-    "surface2":   "#16304e",
-    "surface3":   "#1e3f63",
-    "border":     "#234568",
-    "fg":         "#e6f0ff",
-    "fg_dim":     "#8ba3c7",
-    "fg_sub":     "#5b7291",
+    "bg":         "#0a1220",
+    "bg_alt":     "#0d1626",
+    "surface":    "#111c30",
+    "surface2":   "#172540",
+    "surface3":   "#20324f",
+    "border":     "#2a3f5c",
+    "border_hi":  "#3d567a",
+    "fg":         "#e8eef7",
+    "fg_dim":     "#a3b4cc",
+    "fg_sub":     "#7c8da8",
     "accent":     "#4a9eff",
     "accent_hi":  "#6bb3ff",
     "accent_dn":  "#2d7ce0",
+    "accent_fg":  "#081428",
     "good":       "#2ecc71",
     "good_bg":    "#0e3424",
     "good_bg_hi": "#175132",
     "warn":       "#f0b429",
     "warn_dark":  "#a37a1a",
+    "warn_bg":    "#3a2a0c",
     "bad":        "#ff5c5c",
+    "bad_bg":     "#3a1015",
     "purple":     "#a78bfa",
     "purple_bg":  "#1e2952",
     "purple_hi":  "#2b3a75",
@@ -621,11 +626,54 @@ class App(QMainWindow):
             "QLabel {"
             f"background: {P['surface2']};"
             f"color: {color};"
-            "padding: 6px 12px;"
+            f"border: 1px solid {P['border']};"
+            "border-radius: 10px;"
+            "padding: 5px 14px;"
             "font-family: 'Segoe UI Semibold';"
-            "font-size: 11px;"
+            "font-size: 10px;"
+            "letter-spacing: 1px;"
             "}"
         )
+
+    def _kv_qss(self, color: str) -> str:
+        return f"QLabel {{ color: {color}; background: transparent; }}"
+
+    def _btn_qss(self, role: str, align: str = "center") -> str:
+        palette = {
+            "primary":   (P['accent'],    P['accent_fg'], P['accent_dn'],   P['accent_hi'],  P['accent_dn'],   P['accent_dn']),
+            "secondary": (P['surface2'],  P['fg'],        P['border'],      P['surface3'],   P['border_hi'],   P['surface3']),
+            "auto_on":   (P['auto_bg'],   P['good'],      P['good_bg_hi'],  P['good_bg_hi'], P['good_bg_hi'],  P['good_bg']),
+            "auto_off":  (P['surface2'],  P['fg'],        P['border'],      P['surface3'],   P['border_hi'],   P['surface3']),
+            "mix_on":    (P['purple_bg'], P['purple'],    P['purple_hi'],   P['purple_hi'],  P['purple_hi'],   P['purple_bg']),
+            "mix_off":   (P['surface2'],  P['fg_dim'],    P['border'],      P['surface3'],   P['border_hi'],   P['surface3']),
+        }
+        bg, fg, bd, hov, hov_bd, pressed = palette[role]
+        return (
+            "QPushButton {"
+            f"background: {bg};"
+            f"color: {fg};"
+            f"border: 1px solid {bd};"
+            "border-radius: 10px;"
+            "padding: 0 16px;"
+            "font-family: 'Segoe UI Semibold';"
+            "font-size: 12px;"
+            f"text-align: {align};"
+            "}"
+            "QPushButton:hover {"
+            f"background: {hov};"
+            f"border: 1px solid {hov_bd};"
+            "}"
+            "QPushButton:pressed {"
+            f"background: {pressed};"
+            f"border: 1px solid {P['border_hi']};"
+            "}"
+            "QPushButton:disabled {"
+            f"background: {P['surface']};"
+            f"color: {P['fg_sub']};"
+            f"border: 1px solid {P['border']};"
+            "}"
+        )
+
 
     def _menu_qss(self) -> str:
         return (
@@ -635,19 +683,23 @@ class App(QMainWindow):
             f"border: 1px solid {P['border']};"
             "font-family: 'Segoe UI';"
             "font-size: 11px;"
-            "padding: 4px;"
+            "padding: 6px;"
             "}"
-            "QMenu::item { padding: 6px 22px; }"
+            "QMenu::item {"
+            "padding: 7px 26px 7px 14px;"
+            "border-radius: 5px;"
+            "}"
             "QMenu::item:selected {"
             f"background: {P['accent']};"
-            "color: #ffffff;"
+            f"color: {P['accent_fg']};"
             "}"
             "QMenu::separator {"
             f"background: {P['border']};"
             "height: 1px;"
-            "margin: 4px 8px;"
+            "margin: 5px 10px;"
             "}"
         )
+
 
     def _table_qss(self) -> str:
         return (
@@ -657,12 +709,13 @@ class App(QMainWindow):
             f"border: 1px solid {P['border']};"
             "gridline-color: transparent;"
             "font-family: 'Segoe UI';"
-            "font-size: 11px;"
+            "font-size: 12px;"
+            "outline: none;"
             "}"
             "QTableWidget::item {"
             f"background: {P['surface']};"
             f"color: {P['fg']};"
-            "padding: 6px 10px;"
+            "padding: 8px 12px;"
             "border: none;"
             "}"
             "QTableWidget::item:selected {"
@@ -671,11 +724,13 @@ class App(QMainWindow):
             "}"
             "QHeaderView::section {"
             f"background: {P['bg']};"
-            f"color: {P['fg_dim']};"
+            f"color: {P['fg_sub']};"
             "border: none;"
-            "padding: 8px 10px;"
+            f"border-bottom: 1px solid {P['border']};"
+            "padding: 10px 12px;"
             "font-family: 'Segoe UI Semibold';"
             "font-size: 10px;"
+            "letter-spacing: 1px;"
             "}"
             "QTableCornerButton::section {"
             f"background: {P['bg']};"
@@ -735,18 +790,18 @@ class App(QMainWindow):
         )
 
 
+
     def _kv(self, grid: QGridLayout, row: int, key: str, default: str, small: bool) -> QLabel:
         k = QLabel(key)
         k.setFont(QFont("Segoe UI Semibold", 9))
-        k.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
+        k.setStyleSheet(f"QLabel {{ color: {P['fg_sub']}; background: transparent; letter-spacing: 1px; }}")
         v = QLabel(default)
         v.setFont(QFont("Consolas", 10 if small else 11))
-        v.setStyleSheet(f"QLabel {{ color: {P['fg']}; background: transparent; }}")
+        v.setStyleSheet(self._kv_qss(P['fg']))
         grid.addWidget(k, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
         grid.addWidget(v, row, 1, Qt.AlignLeft | Qt.AlignVCenter)
         return v
 
-    # ------------------------------------------------------- UI build
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -763,7 +818,8 @@ class App(QMainWindow):
 
         header = QFrame()
         header.setFixedHeight(96)
-        header.setStyleSheet(f"QFrame {{ background: {P['surface']}; }}")
+        header.setStyleSheet(
+            f"QFrame {{ background: {P['surface']}; border-bottom: 1px solid {P['border']}; }}")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(22, 0, 22, 0)
         hl.setSpacing(0)
@@ -803,7 +859,8 @@ class App(QMainWindow):
         tb.setSpacing(0)
         lbl_sec = QLabel("SERVERS")
         lbl_sec.setFont(QFont("Segoe UI Semibold", 10))
-        lbl_sec.setStyleSheet(f"QLabel {{ color: {P['fg_dim']}; background: transparent; }}")
+        lbl_sec.setStyleSheet(
+            f"QLabel {{ color: {P['fg_dim']}; background: transparent; letter-spacing: 2px; }}")
         tb.addWidget(lbl_sec)
         tb.addStretch(1)
         self.lbl_count = QLabel("")
@@ -815,6 +872,7 @@ class App(QMainWindow):
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["SERVER", "LATENCY", "AVG", "STATUS", "IP"])
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -848,9 +906,11 @@ class App(QMainWindow):
             "QProgressBar {"
             f"background: {P['surface2']};"
             "border: none;"
+            "border-radius: 1px;"
             "}"
             "QProgressBar::chunk {"
             f"background: {P['accent']};"
+            "border-radius: 1px;"
             "}"
         )
         body_l.addWidget(self.progress)
@@ -871,9 +931,11 @@ class App(QMainWindow):
 
         info = QFrame()
         info.setFixedHeight(112)
-        info.setStyleSheet(f"QFrame {{ background: {P['surface']}; }}")
+        info.setStyleSheet(
+            f"QFrame {{ background: {P['surface']}; "
+            f"border: 1px solid {P['border']}; border-radius: 10px; }}")
         il = QHBoxLayout(info)
-        il.setContentsMargins(16, 14, 16, 14)
+        il.setContentsMargins(18, 14, 18, 14)
         il.setSpacing(28)
 
         left_col = QGridLayout()
@@ -902,46 +964,13 @@ class App(QMainWindow):
         self.btn_test = QPushButton("Run test")
         self.btn_test.setFixedHeight(44)
         self.btn_test.setCursor(Qt.PointingHandCursor)
-        self.btn_test.setStyleSheet(
-            "QPushButton {"
-            f"background: {P['accent']};"
-            "color: #071426;"
-            f"border: 1px solid {P['accent_dn']};"
-            "border-radius: 10px;"
-            "font-family: 'Segoe UI Semibold';"
-            "font-size: 13px;"
-            "}"
-            "QPushButton:hover {"
-            f"background: {P['accent_hi']};"
-            "}"
-            "QPushButton:disabled {"
-            f"background: {P['surface2']};"
-            f"color: {P['fg_sub']};"
-            "border: 1px solid " + P['border'] + ";"
-            "}"
-        )
+        self.btn_test.setStyleSheet(self._btn_qss("primary"))
         self.btn_test.clicked.connect(lambda: self._run_test())
 
         self.btn_apply = QPushButton("Apply fastest")
         self.btn_apply.setFixedHeight(44)
         self.btn_apply.setCursor(Qt.PointingHandCursor)
-        self.btn_apply.setStyleSheet(
-            "QPushButton {"
-            f"background: {P['surface2']};"
-            f"color: {P['fg']};"
-            f"border: 1px solid {P['border']};"
-            "border-radius: 10px;"
-            "font-family: 'Segoe UI Semibold';"
-            "font-size: 13px;"
-            "}"
-            "QPushButton:hover {"
-            f"background: {P['surface3']};"
-            "}"
-            "QPushButton:disabled {"
-            f"background: {P['surface2']};"
-            f"color: {P['fg_sub']};"
-            "}"
-        )
+        self.btn_apply.setStyleSheet(self._btn_qss("secondary"))
         self.btn_apply.clicked.connect(lambda: self._run_apply())
 
         self.btn_auto = QPushButton("Auto: OFF")
@@ -958,7 +987,6 @@ class App(QMainWindow):
 
         self._set_busy(False)
 
-    # ------------------------------------------------------- rows
 
     def _reload_servers(self) -> None:
         self.servers = read_servers()
@@ -1139,88 +1167,21 @@ class App(QMainWindow):
 
     def _update_mix_visual(self) -> None:
         if self.mix_on:
-            self.btn_mix.setText("  MIX TOP 2     primary from #1  \u00b7  secondary from #2")
-            self.btn_mix.setStyleSheet(
-                "QPushButton {"
-                f"background: {P['purple_bg']};"
-                f"color: {P['purple']};"
-                f"border: 1px solid {P['purple_hi']};"
-                "border-radius: 8px;"
-                "text-align: left;"
-                "padding: 0 14px;"
-                "font-family: 'Segoe UI Semibold';"
-                "font-size: 11px;"
-                "}"
-                "QPushButton:hover {"
-                f"background: {P['purple_hi']};"
-                "}"
-                "QPushButton:disabled {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg_sub']};"
-                "border: 1px solid " + P['border'] + ";"
-                "}"
-            )
+            self.btn_mix.setText("  MIX TOP 2     primary from #1  ·  secondary from #2")
+            self.btn_mix.setStyleSheet(self._btn_qss("mix_on", align="left"))
         else:
             self.btn_mix.setText("  MIX TOP 2     same provider for both slots")
-            self.btn_mix.setStyleSheet(
-                "QPushButton {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg_dim']};"
-                f"border: 1px solid {P['border']};"
-                "border-radius: 8px;"
-                "text-align: left;"
-                "padding: 0 14px;"
-                "font-family: 'Segoe UI Semibold';"
-                "font-size: 11px;"
-                "}"
-                "QPushButton:hover {"
-                f"background: {P['surface3']};"
-                "}"
-                "QPushButton:disabled {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg_sub']};"
-                "}"
-            )
+            self.btn_mix.setStyleSheet(self._btn_qss("mix_off", align="left"))
+
 
     def _update_auto_visual(self) -> None:
         if self.auto_on:
             self.btn_auto.setText("Auto: ON")
-            self.btn_auto.setStyleSheet(
-                "QPushButton {"
-                f"background: {P['auto_bg']};"
-                f"color: {P['good']};"
-                f"border: 1px solid {P['good_bg_hi']};"
-                "border-radius: 10px;"
-                "font-family: 'Segoe UI Semibold';"
-                "font-size: 13px;"
-                "}"
-                "QPushButton:hover {"
-                f"background: {P['good_bg_hi']};"
-                "}"
-                "QPushButton:disabled {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg_sub']};"
-                "}"
-            )
+            self.btn_auto.setStyleSheet(self._btn_qss("auto_on"))
         else:
             self.btn_auto.setText("Auto: OFF")
-            self.btn_auto.setStyleSheet(
-                "QPushButton {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg']};"
-                f"border: 1px solid {P['border']};"
-                "border-radius: 10px;"
-                "font-family: 'Segoe UI Semibold';"
-                "font-size: 13px;"
-                "}"
-                "QPushButton:hover {"
-                f"background: {P['surface3']};"
-                "}"
-                "QPushButton:disabled {"
-                f"background: {P['surface2']};"
-                f"color: {P['fg_sub']};"
-                "}"
-            )
+            self.btn_auto.setStyleSheet(self._btn_qss("auto_off"))
+
 
     def _refresh_active(self) -> None:
         addrs = get_current_dns()
@@ -1423,7 +1384,7 @@ class App(QMainWindow):
             self._highlight_top2()
         self._set_busy(True)
         self.val_verify.setText("...")
-        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['warn']}; background: transparent; }}")
+        self.val_verify.setStyleSheet(self._kv_qss(P['warn']))
         self._set_status("applying", P["warn"], pulse=True)
         threading.Thread(target=self._apply_worker, args=(target, then), daemon=True).start()
 
@@ -1459,7 +1420,7 @@ class App(QMainWindow):
     def _apply_success(self, server: Server, primary: str,
                        secondary: str, mode: str) -> None:
         self.val_verify.setText("ok")
-        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['good']}; background: transparent; }}")
+        self.val_verify.setStyleSheet(self._kv_qss(P['good']))
         self._refresh_active()
         self._set_status(f"applied ({mode})", P["good"])
         self.persisted["last_apply"] = {
@@ -1471,7 +1432,7 @@ class App(QMainWindow):
 
     def _apply_failed(self, server: Server) -> None:
         self.val_verify.setText("failed")
-        self.val_verify.setStyleSheet(f"QLabel {{ color: {P['bad']}; background: transparent; }}")
+        self.val_verify.setStyleSheet(self._kv_qss(P['bad']))
         self._refresh_active()
         self._set_status("reverted (verify failed)", P["bad"])
 
